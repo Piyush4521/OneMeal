@@ -43,13 +43,15 @@ OneMeal is a next-generation food donation system designed to minimize food wast
 
 ## 📸 Screenshots
 
-## 📸 Screenshots
 
-| Landing Page | Donor Dashboard |
-| :---: | :---: |
-  ![Landing Page](./screenshots/landing.png)
-  ![login](./screenshots/login.png) 
-  ![recipehub](./screenshots/recipehub.png) 
+| overall UI |
+  ![Landing Page](./screenshots/home.png)
+  ![NGO](./screenshots/ngo.png) 
+  ![Donar](./screenshots/donar.png)
+  ![recipehub](./screenshots/recipe.png)
+  ![Admin](./screenshots/admin.png)
+  ![Leaderboard](./screenshots/karma.png)
+
 
 
 

@@ -33,11 +33,34 @@ const LandingPage = () => {
   }, []);
 
   useEffect(() => {
-    const unsubAnnounce = onSnapshot(doc(db, "system", "global"), (doc) => {
-        if(doc.exists() && doc.data().active) setAnnouncement(doc.data().message);
-        else setAnnouncement("");
-    });
+    const unsubAnnounce = onSnapshot(doc(db, "system", "global"), (docSnapshot) => {
+        if(docSnapshot.exists()) {
+            const data = docSnapshot.data();
+            if (data.active && data.message) {
+                if (data.createdAt) {
+                    const now = new Date().getTime();
+                    const createdTime = data.createdAt.toDate ? data.createdAt.toDate().getTime() : new Date(data.createdAt).getTime();
+                    const hoursDiff = (now - createdTime) / (1000 * 60 * 60);
 
+                    if (hoursDiff < 24) {
+                        setAnnouncement(data.message);
+                    } else {
+                        setAnnouncement(""); 
+                    }
+                } else {
+                    setAnnouncement(data.message);
+                }
+            } else {
+                setAnnouncement("");
+            }
+        } else {
+            setAnnouncement("");
+        }
+    });
+    return () => unsubAnnounce();
+  }, []);
+
+  useEffect(() => {
     const fetchStats = async () => {
         try {
             const q = query(collection(db, "donations"), where("status", "==", "completed"));
@@ -62,11 +85,12 @@ const LandingPage = () => {
             })).sort((a,b) => b.karma - a.karma).slice(0, 3);
             
             setLeaderboard(sorted);
-        } catch(e) { console.error(e); }
+        } catch(e) { 
+            console.error("Leaderboard Error (Check Firebase Rules):", e); 
+        }
     }
-    fetchStats();
     
-    return () => unsubAnnounce();
+    fetchStats();
   }, []);
 
   const handleLogout = async () => {

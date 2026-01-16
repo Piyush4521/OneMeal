@@ -1,11 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChefHat, Loader, Home, Lightbulb, X, Clock, Flame, Utensils, ArrowRight, Smile } from 'lucide-react';
+import { ChefHat, Loader, Home, Lightbulb, X, Clock, Flame, Utensils, ArrowRight, Smile, Search, Activity, Zap, BookOpen, Menu } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { NeoButton } from '../components/ui/NeoButton';
 import toast from 'react-hot-toast';
 
-const API_KEY = "YOUR_GOOGLE_GEMINI_API_KEY_HERE";
+const GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE";
+const POLLINATIONS_KEY = "YOUR_POLLINATIONS_API_KEY_HERE";
 
 const FOOD_FACTS = [
   "🍯 Honey never spoils! Archaeologists have found edible honey in ancient Egyptian tombs over 3,000 years old.",
@@ -17,14 +18,34 @@ const FOOD_FACTS = [
   "🍞 Stale bread isn't trash! It makes the best French Toast, breadcrumbs, or crunchy croutons.",
   "🥔 Potato skins hold most of the fiber and nutrients. Scrub them clean and leave them on!",
   "☕ Used coffee grounds are rich in nitrogen—sprinkle them in your garden to help plants grow faster.",
-  "🌍 Wasting food produces methane, a greenhouse gas 25x more potent than CO2. Saving food saves the planet!", 
-  "🍯 Honey kabhi kharab nahi hota. 3000 saal purana honey bhi kha sakte ho!",
-  "🍓 Strawberries berry nahi hai, par Kela (Banana) ek berry hai! Shocking?",
-  "🥕 Pehle Gajar (Carrots) purple color ke hote the, orange nahi.",
-  "🍫 Ek zamane mein Chocolate ko 'paisa' (currency) maana jaata tha.",
-  "🍎 Apple pani mein float karta hai kyunki wo 25% hawa hai.",
-  "🇮🇳 India sabse zyada Milk produce karta hai puri duniya mein!",
-  "🥒 Kheera (Cucumber) mein 96% pani hota hai. Garmi mein best!"
+  "🌍 Wasting food produces methane, a greenhouse gas 25x more potent than CO2. Saving food saves the planet!"
+];
+
+const READY_RECIPES = [
+    {
+        title: "Masala Khichdi (One Pot)",
+        time: "20 mins",
+        calories: "320 kcal",
+        tags: ["Zero Waste", "Comfort Food"],
+        ingredients: ["Rice", "Moong Dal", "Mixed Veggies", "Turmeric", "Ghee"],
+        instructions: ["Wash rice and dal.", "Sauté veggies in cooker with ghee and spices.", "Add rice, dal, water.", "Pressure cook for 3 whistles.", "Serve hot with curd."]
+    },
+    {
+        title: "Leftover Roti Noodles",
+        time: "10 mins",
+        calories: "250 kcal",
+        tags: ["Snack", "Reuse"],
+        ingredients: ["Stale Roti", "Onion", "Capsicum", "Soy Sauce", "Ketchup"],
+        instructions: ["Cut rotis into thin strips.", "Stir fry veggies on high heat.", "Add sauces and mix.", "Toss in roti strips and cook for 2 mins.", "Garnish with coriander."]
+    },
+    {
+        title: "Banana Peel Chutney",
+        time: "15 mins",
+        calories: "120 kcal",
+        tags: ["Zero Waste", "Unique"],
+        ingredients: ["Banana Peels", "Green Chilies", "Coconut", "Tamarind", "Salt"],
+        instructions: ["Boil banana peels until soft.", "Grind with chilies, coconut, and tamarind.", "Add a tadka of mustard seeds and curry leaves.", "Perfect side for dosa/idli."]
+    }
 ];
 
 const LOADING_JOKES = [
@@ -35,19 +56,18 @@ const LOADING_JOKES = [
     "🍛 Masala koot raha hu...",
     "🥔 Aloo cheel raha hu...",
     "🥗 Dhaniya dhoond raha hu (mil nahi raha)...",
-    "📞 Mummy se recipe confirm kar raha hu...",
-    "💨 Kuukar ki 3 siti ka wait kar raha hu...",
-    "🌶️ Mirchi thodi zyada ho gayi, adjust kar raha hu..."
+    "📞 Mummy se recipe confirm kar raha hu..."
 ];
 
 const RecipeHub = () => {
-  const [activeTab, setActiveTab] = useState<'search' | 'diet'>('search');
+  const [activeTab, setActiveTab] = useState<'search' | 'diet' | 'ready' | 'facts'>('search');
   const [inputValue, setInputValue] = useState('');
   const [recipes, setRecipes] = useState<any[]>([]); 
   const [loading, setLoading] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string>("");
-  const [currentFact, setCurrentFact] = useState(0);
+  const [, setCurrentFact] = useState(0);
   const [selectedRecipe, setSelectedRecipe] = useState<any | null>(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     const interval = setInterval(() => setCurrentFact((p) => (p + 1) % FOOD_FACTS.length), 4000);
@@ -67,13 +87,25 @@ const RecipeHub = () => {
   }, [loading]);
 
   const handleSmartCook = async () => {
-    if (!inputValue) return toast.error("Arre bhai, kuch likho toh sahi!");
+    if (!inputValue.trim()) {
+        toast.error("Arre bhai, kuch likho toh sahi!");
+        return;
+    }
+
+    const isValidInput = /[a-zA-Z]/.test(inputValue) && inputValue.length > 2;
     
+    if (!isValidInput) {
+        toast.error("Please enter correct food item 🍎");
+        return;
+    }
+
+    if (!GEMINI_API_KEY || GEMINI_API_KEY.includes("PASTE_YOUR")) return toast.error("Gemini API Key missing!");
+
     setLoading(true);
     setRecipes([]); 
     
     try {
-      const modelsResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${API_KEY}`);
+      const modelsResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`);
       const modelsData = await modelsResponse.json();
       
       if (modelsData.error) throw new Error(modelsData.error.message);
@@ -99,7 +131,7 @@ const RecipeHub = () => {
       }
 
       const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${API_KEY}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -118,127 +150,216 @@ const RecipeHub = () => {
 
     } catch (error: any) {
       console.error(error);
-      setStatusMsg("❌ Chef thoda confused hai. Phir se try karo.");
-      toast.error("Error connecting to Chef.");
+      if (error.message && error.message.includes("429")) {
+        setStatusMsg("❌ Chef is busy (Quota Limit). Wait 1 min.");
+        toast.error("Too many requests! Wait a bit.");
+      } else {
+        setStatusMsg("❌ Chef thoda confused hai. Phir se try karo.");
+        toast.error("Error connecting to Chef.");
+      }
     } finally {
       setLoading(false);
     }
   };
 
+  const getStableSeed = (str: string) => {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      const char = str.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash;
+    }
+    return Math.abs(hash);
+  };
+
+  const getPollinationsImage = useCallback((title: string, index: number) => {
+    const uniqueTitle = `${title}-${index}`; 
+    const seed = getStableSeed(uniqueTitle);
+    
+    const prompt = `delicious ${title}, indian food, 8k, photorealistic, cinematic lighting`;
+    
+    let imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?nologo=true&seed=${seed}&model=dreamshaper&enhance=true`;
+    
+    if (POLLINATIONS_KEY && !POLLINATIONS_KEY.includes("PASTE_YOUR")) {
+        imageUrl += `&token=${POLLINATIONS_KEY}`;
+    }
+
+    return imageUrl;
+  }, []);
+
+  const handleImageError = (e: any) => {
+    e.currentTarget.src = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?q=80&w=800&auto=format&fit=crop";
+  };
+
+  const switchTab = (tab: any) => {
+      setActiveTab(tab);
+      setRecipes([]);
+      setInputValue("");
+      setMobileMenuOpen(false); 
+  };
+
   return (
-    <div className="min-h-screen bg-[#FFFDF5] font-sans p-4 md:p-8 relative overflow-x-hidden text-black">
+    <div className="min-h-screen bg-[#FFFDF5] font-sans relative overflow-x-hidden text-black flex flex-col">
       
-      <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-[-10%] right-[-5%] w-96 h-96 bg-yellow-200 rounded-full mix-blend-multiply filter blur-3xl opacity-50 animate-blob"></div>
-        <div className="absolute top-[-10%] left-[-5%] w-96 h-96 bg-pink-200 rounded-full mix-blend-multiply filter blur-3xl opacity-50 animate-blob animation-delay-2000"></div>
-        <div className="absolute -bottom-32 left-20 w-96 h-96 bg-purple-200 rounded-full mix-blend-multiply filter blur-3xl opacity-50 animate-blob animation-delay-4000"></div>
-      </div>
-
-      <div className="absolute inset-0 pointer-events-none opacity-20">
-        <motion.div animate={{ y: [0, -20, 0] }} transition={{ duration: 4, repeat: Infinity }} className="absolute top-20 left-10 text-6xl">🍕</motion.div>
-        <motion.div animate={{ y: [0, 20, 0] }} transition={{ duration: 5, repeat: Infinity }} className="absolute bottom-40 right-10 text-6xl">🥘</motion.div>
-        <motion.div animate={{ y: [0, -15, 0] }} transition={{ duration: 6, repeat: Infinity }} className="absolute top-40 right-20 text-6xl">🥑</motion.div>
-      </div>
-
-      <header className="flex items-center justify-between gap-4 mb-8 relative z-10 max-w-6xl mx-auto">
+      {/* HEADER */}
+      <header className="flex items-center justify-between gap-4 p-4 md:p-6 border-b-2 border-black bg-white relative z-20 shadow-sm">
         <div className="flex items-center gap-4">
             <Link to="/"><NeoButton variant="secondary" className="p-3 rounded-full"><Home size={24} /></NeoButton></Link>
             <div>
-                <h1 className="text-3xl font-black">Recipe <span className="text-[#FFD700]">Hub</span> 🤖</h1>
-                <p className="font-bold text-gray-500 text-sm">Apna personal AI Bawarchi</p>
+                <h1 className="text-2xl md:text-3xl font-black flex items-center gap-2">Recipe <span className="text-[#FFD700]">Hub</span> <ChefHat/></h1>
+                <p className="font-bold text-gray-500 text-xs md:text-sm">Apna personal AI Bawarchi</p>
             </div>
         </div>
+        <button className="md:hidden p-2 border-2 border-black rounded-lg" onClick={() => setMobileMenuOpen(!mobileMenuOpen)}>
+            <Menu size={24} />
+        </button>
       </header>
 
-      <div className="flex justify-center gap-4 mb-8 relative z-10">
-        <button onClick={() => {setActiveTab('search'); setRecipes([]);}} className={`px-6 py-3 font-black text-lg border-2 border-black rounded-xl transition-all flex items-center gap-2 ${activeTab === 'search' ? 'bg-[#FFD700] shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] -translate-y-1' : 'bg-white hover:bg-gray-50'}`}>
-          🥕 Jugaad Search
-        </button>
-        <button onClick={() => {setActiveTab('diet'); setRecipes([]);}} className={`px-6 py-3 font-black text-lg border-2 border-black rounded-xl transition-all flex items-center gap-2 ${activeTab === 'diet' ? 'bg-[#FF6B6B] text-white shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] -translate-y-1' : 'bg-white hover:bg-gray-50'}`}>
-          🩺 Healthy Banunga
-        </button>
-      </div>
-
-      <div className="max-w-4xl mx-auto text-center mb-12 relative z-10">
-        <h2 className="text-4xl font-black mb-4">
-            {activeTab === 'search' ? "Fridge mein kya pada hai?" : "Fitness Goal kya hai boss?"}
-        </h2>
+      <div className="flex flex-1 relative z-10 max-w-7xl mx-auto w-full">
         
-        <div className="bg-white p-2 border-4 border-black rounded-2xl shadow-neo flex flex-col md:flex-row gap-2">
-          <input 
-            type="text" 
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            placeholder={activeTab === 'search' ? "e.g. 2 Aloo, 1 Pyaaz, Basi Rice..." : "e.g. Weight Loss, Muscle Gain, High Protein..."}
-            className="flex-1 bg-transparent p-4 font-bold text-lg outline-none placeholder:text-gray-400"
-            onKeyDown={(e) => e.key === 'Enter' && handleSmartCook()}
-          />
-          <NeoButton onClick={handleSmartCook} className="bg-black text-white px-8 py-4 text-lg min-w-[180px] rounded-xl" disabled={loading}>
-            {loading ? <Loader className="animate-spin mx-auto" /> : <>{activeTab === 'search' ? 'Jadoo Dikhao ✨' : 'Plan Banao 📝'}</>}
-          </NeoButton>
-        </div>
-        
-        {loading && (
-            <div className="mt-6 flex flex-col items-center">
-                <div className="text-4xl animate-bounce mb-2">👨‍🍳</div>
-                <p className="font-black text-xl text-dark">{statusMsg}</p>
-            </div>
-        )}
-      </div>
+        {/* SIDEBAR (Desktop) */}
+        <aside className={`
+            fixed md:relative top-[80px] md:top-0 left-0 w-64 h-full md:h-auto bg-white border-r-2 border-black p-6 space-y-4 transition-transform duration-300 z-30
+            ${mobileMenuOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+        `}>
+            <div className="text-xs font-black text-gray-400 uppercase tracking-widest mb-2">Menu</div>
+            
+            <button 
+                onClick={() => switchTab('search')} 
+                className={`w-full text-left p-4 font-black text-lg border-2 border-black rounded-xl transition-all flex items-center gap-3 ${activeTab === 'search' ? 'bg-[#FFD700] shadow-neo translate-x-2' : 'bg-white hover:bg-gray-50 hover:translate-x-1'}`}
+            >
+                <Search size={20}/> Jugaad Search
+            </button>
 
-      {!loading && recipes.length === 0 && (
-        <motion.div 
-          key={currentFact}
-          initial={{ opacity: 0, scale: 0.9, rotate: -1 }} 
-          animate={{ opacity: 1, scale: 1, rotate: -1 }}
-          className="max-w-xl mx-auto mt-8 bg-yellow-100 border-4 border-black rounded-none rotate-1 p-8 text-center shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] relative z-10"
-          style={{clipPath: "polygon(0% 0%, 100% 2%, 98% 100%, 2% 98%)"}} 
-        >
-          <div className="absolute -top-4 left-[45%] bg-red-500 w-4 h-12 border-2 border-black"></div> 
-          <Lightbulb className="mx-auto mb-4 text-orange-500 w-10 h-10" />
-          <h3 className="font-black text-gray-500 uppercase tracking-widest mb-2 text-sm">Kya aapko pata hai?</h3>
-          <p className="font-black text-2xl leading-tight">"{FOOD_FACTS[currentFact]}"</p>
-        </motion.div>
-      )}
+            <button 
+                onClick={() => switchTab('diet')} 
+                className={`w-full text-left p-4 font-black text-lg border-2 border-black rounded-xl transition-all flex items-center gap-3 ${activeTab === 'diet' ? 'bg-[#FF6B6B] text-white shadow-neo translate-x-2' : 'bg-white hover:bg-gray-50 hover:translate-x-1'}`}
+            >
+                <Activity size={20}/> Healthy Banao
+            </button>
 
-      <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8 max-w-6xl mx-auto relative z-10 pb-20">
-        {recipes.map((recipe, index) => (
-          <motion.div 
-            key={index}
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: index * 0.1 }}
-            whileHover={{ scale: 1.03, rotate: 1 }}
-            className="bg-white border-4 border-black rounded-3xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] flex flex-col cursor-pointer group"
-            onClick={() => setSelectedRecipe(recipe)}
-          >
-            <div className="h-48 overflow-hidden border-b-4 border-black bg-gray-100 relative group">
-              <img 
-                src={`https://image.pollinations.ai/prompt/${encodeURIComponent(`delicious ${recipe.title} indian food style photorealistic 4k`)}?nologo=true`} 
-                alt={recipe.title}
-                className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
-                onError={(e) => { e.currentTarget.src = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?q=80&w=800&auto=format&fit=crop"; }}
-              />
-              <div className="absolute inset-0 bg-black/20 group-hover:bg-transparent transition-colors"></div>
-            </div>
+            <button 
+                onClick={() => switchTab('ready')} 
+                className={`w-full text-left p-4 font-black text-lg border-2 border-black rounded-xl transition-all flex items-center gap-3 ${activeTab === 'ready' ? 'bg-green-400 shadow-neo translate-x-2' : 'bg-white hover:bg-gray-50 hover:translate-x-1'}`}
+            >
+                <Zap size={20}/> Ready Recipes
+            </button>
 
-            <div className="p-6">
-              <h3 className="text-2xl font-black mb-2 leading-tight">{recipe.title}</h3>
-              <div className="flex gap-2 mb-4 flex-wrap">
-                {recipe.tags?.map((tag: string, i: number) => (
-                  <span key={i} className="bg-yellow-100 border-2 border-black px-2 py-1 rounded text-xs font-bold">{tag}</span>
+            <button 
+                onClick={() => switchTab('facts')} 
+                className={`w-full text-left p-4 font-black text-lg border-2 border-black rounded-xl transition-all flex items-center gap-3 ${activeTab === 'facts' ? 'bg-blue-300 shadow-neo translate-x-2' : 'bg-white hover:bg-gray-50 hover:translate-x-1'}`}
+            >
+                <BookOpen size={20}/> Food Facts
+            </button>
+        </aside>
+
+        <main className="flex-1 p-4 md:p-8 overflow-hidden">
+            
+            {(activeTab === 'search' || activeTab === 'diet') && (
+                <div className="max-w-4xl mx-auto">
+                    <div className="text-center mb-10">
+                        <h2 className="text-4xl font-black mb-4">
+                            {activeTab === 'search' ? "Fridge mein kya pada hai?" : "Fitness Goal kya hai boss?"}
+                        </h2>
+                        
+                        <div className="bg-white p-2 border-4 border-black rounded-2xl shadow-neo flex flex-col md:flex-row gap-2">
+                        <input 
+                            type="text" 
+                            value={inputValue}
+                            onChange={(e) => setInputValue(e.target.value)}
+                            placeholder={activeTab === 'search' ? "e.g. 2 Aloo, 1 Pyaaz, Basi Rice..." : "e.g. Weight Loss, Muscle Gain, High Protein..."}
+                            className="flex-1 bg-transparent p-4 font-bold text-lg outline-none placeholder:text-gray-400"
+                            onKeyDown={(e) => e.key === 'Enter' && handleSmartCook()}
+                        />
+                        <NeoButton onClick={handleSmartCook} className="bg-black text-white px-8 py-4 text-lg min-w-[180px] rounded-xl" disabled={loading}>
+                            {loading ? <Loader className="animate-spin mx-auto" /> : <>{activeTab === 'search' ? 'Jadoo Dikhao ✨' : 'Plan Banao 📝'}</>}
+                        </NeoButton>
+                        </div>
+                    </div>
+
+                    {loading && (
+                        <div className="flex flex-col items-center justify-center py-10">
+                            <div className="text-6xl animate-bounce mb-4">👨‍🍳</div>
+                            <p className="font-black text-2xl text-dark text-center px-4">{statusMsg}</p>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {activeTab === 'ready' && (
+                <div className="max-w-4xl mx-auto">
+                    <h2 className="text-4xl font-black mb-2 flex items-center gap-2"><Zap className="text-green-600" fill="currentColor"/> Quick & Ready Recipes</h2>
+                    <p className="font-bold text-gray-500 mb-8">Minimum Food Waste. Maximum Taste. 15 Mins Only.</p>
+                </div>
+            )}
+
+            {activeTab === 'facts' && (
+                <div className="max-w-4xl mx-auto">
+                    <h2 className="text-4xl font-black mb-2 flex items-center gap-2"><Lightbulb className="text-yellow-500" fill="currentColor"/> Did You Know?</h2>
+                    <p className="font-bold text-gray-500 mb-8">Interesting facts about food and sustainability.</p>
+                    
+                    <div className="grid md:grid-cols-2 gap-6">
+                        {FOOD_FACTS.map((fact, index) => (
+                            <div key={index} className="bg-white border-4 border-black rounded-xl p-6 shadow-neo hover:scale-[1.02] transition-transform">
+                                <span className="text-4xl mb-4 block">{fact.split(' ')[0]}</span>
+                                <p className="font-bold text-lg text-gray-800 leading-relaxed">{fact.substring(2)}</p>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8 max-w-6xl mx-auto relative z-10 pb-20">
+                {(activeTab === 'ready' ? READY_RECIPES : recipes).map((recipe, index) => (
+                    <motion.div 
+                        key={index}
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: index * 0.1 }}
+                        whileHover={{ scale: 1.03, rotate: 1 }}
+                        className="bg-white border-4 border-black rounded-3xl overflow-hidden shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] flex flex-col cursor-pointer group"
+                        onClick={() => setSelectedRecipe(recipe)}
+                    >
+                    <div className="h-48 overflow-hidden border-b-4 border-black bg-gray-100 relative group">
+                        <img 
+                        src={getPollinationsImage(recipe.title, index)}
+                        alt={recipe.title}
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
+                        onError={handleImageError}
+                        />
+                        <div className="absolute inset-0 bg-black/20 group-hover:bg-transparent transition-colors"></div>
+                    </div>
+
+                    <div className="p-6 flex flex-col flex-1">
+                        <h3 className="text-2xl font-black mb-2 leading-tight">{recipe.title}</h3>
+                        <div className="flex gap-2 mb-4 flex-wrap">
+                        {recipe.tags?.map((tag: string, i: number) => (
+                            <span key={i} className="bg-yellow-100 border-2 border-black px-2 py-1 rounded text-xs font-bold">{tag}</span>
+                        ))}
+                        </div>
+                        <div className="flex justify-between text-gray-600 font-bold mt-auto pt-4 border-t-2 border-dashed border-gray-300">
+                        <span className="flex items-center gap-1"><Flame size={16} className="text-orange-500"/> {recipe.calories}</span>
+                        <span className="flex items-center gap-1"><Clock size={16} className="text-blue-500"/> {recipe.time}</span>
+                        </div>
+                        <div className="mt-4 text-right">
+                        <span className="text-sm font-black underline decoration-2 decoration-primary flex items-center justify-end gap-1">View Recipe <ArrowRight size={16}/></span>
+                        </div>
+                    </div>
+                    </motion.div>
                 ))}
-              </div>
-              <div className="flex justify-between text-gray-600 font-bold mt-auto pt-4 border-t-2 border-dashed border-gray-300">
-                <span className="flex items-center gap-1"><Flame size={16} className="text-orange-500"/> {recipe.calories}</span>
-                <span className="flex items-center gap-1"><Clock size={16} className="text-blue-500"/> {recipe.time}</span>
-              </div>
-              <div className="mt-4 text-right">
-                <span className="text-sm font-black underline decoration-2 decoration-primary flex items-center justify-end gap-1">View Recipe <ArrowRight size={16}/></span>
-              </div>
             </div>
-          </motion.div>
-        ))}
+
+            {!loading && recipes.length === 0 && (activeTab === 'search' || activeTab === 'diet') && (
+                <div className="flex items-center justify-center h-64 opacity-50">
+                    <div className="text-center">
+                        <Utensils size={48} className="mx-auto mb-4 text-gray-400"/>
+                        <p className="text-xl font-bold text-gray-400">Search to see magic happen...</p>
+                    </div>
+                </div>
+            )}
+        </main>
       </div>
 
       <AnimatePresence>
@@ -256,14 +377,16 @@ const RecipeHub = () => {
 
               <div className="p-0">
                  <div className="h-40 w-full overflow-hidden border-b-4 border-black relative">
-                     <img 
-                        src={`https://image.pollinations.ai/prompt/${encodeURIComponent(`delicious ${selectedRecipe.title} indian food closeup`)}?nologo=true`} 
+                      <img 
+                        src={getPollinationsImage(selectedRecipe.title, 0)} 
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
                         className="w-full h-full object-cover"
-                        onError={(e) => { e.currentTarget.src = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?q=80&w=800&auto=format&fit=crop"; }}
-                     />
-                     <div className="absolute bottom-0 left-0 bg-black/60 backdrop-blur-sm p-4 w-full">
+                        onError={handleImageError}
+                      />
+                      <div className="absolute bottom-0 left-0 bg-black/60 backdrop-blur-sm p-4 w-full">
                         <h2 className="text-3xl font-black text-white">{selectedRecipe.title}</h2>
-                     </div>
+                      </div>
                  </div>
 
                 <div className="p-6 md:p-8">

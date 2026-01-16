@@ -1,20 +1,21 @@
 import { useEffect, useState } from 'react';
 import { db, auth } from '../firebase';
-import { collection, onSnapshot, doc, updateDoc, setDoc, query, orderBy } from 'firebase/firestore';
-import { Users, Megaphone, Ban, CheckCircle, LogOut, Package, MapPin, Activity, AlertTriangle, ShieldAlert } from 'lucide-react';
+import { collection, onSnapshot, doc, updateDoc, setDoc, query, orderBy, deleteDoc } from 'firebase/firestore';
+import { Users, Megaphone, Ban, CheckCircle, LogOut, Package, MapPin, Activity, AlertTriangle, ShieldAlert, MessageSquare, Trash2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { NeoButton } from '../components/ui/NeoButton';
 import toast from 'react-hot-toast';
 
-  const AdminDashboard = () => {
+const AdminDashboard = () => {
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState<'users' | 'announcement' | 'donations'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'announcement' | 'donations' | 'suggestions'>('users');
   const [users, setUsers] = useState<any[]>([]);
   const [donations, setDonations] = useState<any[]>([]);
+  const [suggestions, setSuggestions] = useState<any[]>([]);
   const [announcement, setAnnouncement] = useState('');
   const [loading, setLoading] = useState(true);
-  useEffect(() => {
 
+  useEffect(() => {
     if (!auth.currentUser) {
         navigate('/admin');
         return;
@@ -30,9 +31,14 @@ import toast from 'react-hot-toast';
         console.error("Donation fetch error:", error);
         setLoading(false);
     });
+    const qSuggestions = query(collection(db, "suggestions"), orderBy("createdAt", "desc"));
+    const unsubSuggestions = onSnapshot(qSuggestions, (snap) => {
+        setSuggestions(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
 
-    return () => { unsubUsers(); unsubDonations(); };
+    return () => { unsubUsers(); unsubDonations(); unsubSuggestions(); };
   }, [navigate]);
+
   const toggleBan = async (userId: string, currentStatus: boolean) => {
       if(!window.confirm(`Are you sure you want to ${currentStatus ? 'Unban' : 'BAN'} this user?`)) return;
       try {
@@ -47,12 +53,21 @@ import toast from 'react-hot-toast';
           await setDoc(doc(db, "system", "global"), { 
               message: announcement, 
               active: true,
-              timestamp: new Date()
+              createdAt: new Date() 
           });
           toast.success("Announcement Live! 📢");
           setAnnouncement("");
       } catch(e) { toast.error("Failed to post"); }
   };
+
+  const deleteSuggestion = async (id: string) => {
+      if(!window.confirm("Delete this suggestion?")) return;
+      try {
+          await deleteDoc(doc(db, "suggestions", id));
+          toast.success("Suggestion deleted");
+      } catch(e) { toast.error("Error deleting"); }
+  };
+
   const formatTime = (timestamp: any) => {
       if(!timestamp) return "N/A";
       const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
@@ -75,7 +90,7 @@ import toast from 'react-hot-toast';
 
   return (
     <div className="min-h-screen bg-grid-pattern font-sans pb-10 bg-gray-50">
-            <div className="w-full bg-black text-white overflow-hidden py-2 border-b-4 border-dark mb-6 sticky top-0 z-50 shadow-md">
+      <div className="w-full bg-black text-white overflow-hidden py-2 border-b-4 border-dark mb-6 sticky top-0 z-50 shadow-md">
         <div className="animate-marquee whitespace-nowrap font-mono font-bold text-sm flex items-center gap-8">
             <span className="text-green-400">● SYSTEM ONLINE</span>
             <span>⚡ LOAD: 12%</span>
@@ -106,7 +121,8 @@ import toast from 'react-hot-toast';
 
             <Activity className="absolute right-[-20px] top-[-40px] text-gray-100 w-64 h-64 rotate-12 pointer-events-none" />
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
             <div className="bg-blue-100 border-4 border-dark rounded-xl p-5 shadow-neo flex items-center gap-4 transition-transform hover:-translate-y-1">
                 <div className="bg-blue-500 text-white p-3 rounded-lg border-2 border-dark">
                     <Users size={32} />
@@ -127,6 +143,16 @@ import toast from 'react-hot-toast';
                 </div>
             </div>
 
+            <div className="bg-yellow-100 border-4 border-dark rounded-xl p-5 shadow-neo flex items-center gap-4 transition-transform hover:-translate-y-1">
+                <div className="bg-yellow-500 text-white p-3 rounded-lg border-2 border-dark">
+                    <MessageSquare size={32} />
+                </div>
+                <div>
+                    <h3 className="font-black text-3xl">{suggestions.length}</h3>
+                    <p className="font-bold text-gray-600 text-sm">New Suggestions</p>
+                </div>
+            </div>
+
             <div className="bg-red-100 border-4 border-dark rounded-xl p-5 shadow-neo flex items-center gap-4 transition-transform hover:-translate-y-1">
                 <div className="bg-red-500 text-white p-3 rounded-lg border-2 border-dark">
                     <Ban size={32} />
@@ -137,6 +163,7 @@ import toast from 'react-hot-toast';
                 </div>
             </div>
         </div>
+
         <div className="grid md:grid-cols-4 gap-6">
             <div className="space-y-4 h-fit sticky top-24 z-30">
                 <button onClick={() => setActiveTab('users')} className={`w-full p-4 border-2 border-dark rounded-xl font-bold flex items-center gap-3 transition-all hover:translate-x-1 ${activeTab === 'users' ? 'bg-primary shadow-neo translate-x-1' : 'bg-white'}`}>
@@ -144,6 +171,9 @@ import toast from 'react-hot-toast';
                 </button>
                 <button onClick={() => setActiveTab('donations')} className={`w-full p-4 border-2 border-dark rounded-xl font-bold flex items-center gap-3 transition-all hover:translate-x-1 ${activeTab === 'donations' ? 'bg-green-400 shadow-neo translate-x-1' : 'bg-white'}`}>
                     <Package size={20}/> Food Tracking
+                </button>
+                <button onClick={() => setActiveTab('suggestions')} className={`w-full p-4 border-2 border-dark rounded-xl font-bold flex items-center gap-3 transition-all hover:translate-x-1 ${activeTab === 'suggestions' ? 'bg-purple-400 shadow-neo translate-x-1' : 'bg-white'}`}>
+                    <MessageSquare size={20}/> Suggestions
                 </button>
                 <button onClick={() => setActiveTab('announcement')} className={`w-full p-4 border-2 border-dark rounded-xl font-bold flex items-center gap-3 transition-all hover:translate-x-1 ${activeTab === 'announcement' ? 'bg-yellow-400 shadow-neo translate-x-1' : 'bg-white'}`}>
                     <Megaphone size={20}/> Announcements
@@ -230,8 +260,8 @@ import toast from 'react-hot-toast';
                                     <tr key={d.id} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
                                         <td className="p-3">
                                             <div className="font-black text-gray-800 uppercase flex items-center gap-2">
-                                              {d.foodItem}
-                                              {d.verified && <span className="text-[10px] bg-blue-100 text-blue-700 px-1 rounded border border-blue-200">AI OK</span>}
+                                                {d.foodItem}
+                                                {d.verified && <span className="text-[10px] bg-blue-100 text-blue-700 px-1 rounded border border-blue-200">AI OK</span>}
                                             </div>
                                             {d.quantity && <span className="text-xs font-bold bg-gray-100 px-2 py-0.5 rounded text-gray-600">{d.quantity}</span>}
                                         </td>
@@ -265,6 +295,42 @@ import toast from 'react-hot-toast';
                     </div>
                 )}
 
+                {activeTab === 'suggestions' && (
+                    <div className="animate-fadeIn">
+                        <div className="flex justify-between items-center mb-6 border-b-2 border-gray-100 pb-4">
+                            <h2 className="text-2xl font-black flex items-center gap-2"><MessageSquare/> User Suggestions</h2>
+                        </div>
+                        {suggestions.length === 0 ? (
+                            <div className="text-center py-12 text-gray-500 font-bold">
+                                No suggestions received yet.
+                            </div>
+                        ) : (
+                            <div className="space-y-4">
+                                {suggestions.map(s => (
+                                    <div key={s.id} className="bg-purple-50 border-2 border-purple-200 p-4 rounded-xl relative group">
+                                        <div className="flex justify-between items-start mb-2">
+                                            <div>
+                                                <h4 className="font-black text-purple-900 text-lg">{s.title || "Suggestion"}</h4>
+                                                <span className="text-xs font-bold text-purple-600">From: {s.userName || "Anonymous"}</span>
+                                            </div>
+                                            <span className="text-xs font-mono text-gray-500">{formatTime(s.createdAt)}</span>
+                                        </div>
+                                        <p className="text-gray-700 font-medium">{s.message}</p>
+                                        
+                                        <button 
+                                            onClick={() => deleteSuggestion(s.id)}
+                                            className="absolute bottom-4 right-4 bg-white border border-red-200 text-red-500 p-2 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-50"
+                                            title="Delete Suggestion"
+                                        >
+                                            <Trash2 size={16} />
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
+
                 {activeTab === 'announcement' && (
                     <div className="animate-fadeIn">
                         <h2 className="text-2xl font-black mb-6 flex items-center gap-2"><Megaphone/> Global Broadcast</h2>
@@ -276,7 +342,7 @@ import toast from 'react-hot-toast';
                                     <p className="font-black text-yellow-800">Emergency Broadcast System</p>
                                     <p className="text-sm font-medium text-yellow-700 mt-1">
                                         Sending a message here will trigger a notification on <b>ALL</b> user screens immediately. 
-                                        Use this for weather alerts or urgent food requirements.
+                                        The message will automatically expire after 24 hours.
                                     </p>
                                 </div>
                             </div>

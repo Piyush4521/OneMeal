@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { X, Send, Bot } from 'lucide-react';
 import { NeoButton } from './ui/NeoButton';
 
-const API_KEY = "YOUR_GOOGLE_GEMINI_API_KEY_HERE";
+const API_KEY = "YOUR_GEMINI_API_KEY_HERE";
 
 type Message = {
   id: number;
