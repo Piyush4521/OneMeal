@@ -1,12 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ChefHat, Loader, Home, Lightbulb, X, Clock, Flame, Utensils, ArrowRight, Smile, Search, Activity, Zap, BookOpen, Menu } from 'lucide-react';
+import { ChefHat, Loader, Home, Lightbulb, X, Clock, Flame, Utensils, ArrowRight, Smile, Search, Activity, Zap, BookOpen, Menu, Sparkles, Shuffle, Leaf } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { NeoButton } from '../components/ui/NeoButton';
 import toast from 'react-hot-toast';
+import { generateJson, isGeminiConfigured } from '../lib/aiClient';
 
-const GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE";
-const POLLINATIONS_KEY = "YOUR_POLLINATIONS_API_KEY_HERE";
+const POLLINATIONS_KEY = ((import.meta.env.VITE_POLLINATIONS_KEY as string | undefined) ?? '').trim();
+const RECIPE_SEED_KEY = 'onemeal_recipe_seed';
+const hasPollinationsKey = Boolean(POLLINATIONS_KEY) && !/YOUR_|PASTE_|REPLACE_/i.test(POLLINATIONS_KEY);
 
 const FOOD_FACTS = [
   "🍯 Honey never spoils! Archaeologists have found edible honey in ancient Egyptian tombs over 3,000 years old.",
@@ -59,6 +61,16 @@ const LOADING_JOKES = [
     "📞 Mummy se recipe confirm kar raha hu..."
 ];
 
+const AI_MODES = [
+    { id: 'balanced', label: 'Balanced', prompt: 'balanced homestyle' },
+    { id: 'quick', label: '15-min', prompt: 'fast 15-minute meals' },
+    { id: 'protein', label: 'High Protein', prompt: 'high protein' },
+    { id: 'low-oil', label: 'Low Oil', prompt: 'low oil and light' },
+    { id: 'budget', label: 'Budget', prompt: 'budget-friendly' },
+    { id: 'no-onion', label: 'No Onion/Garlic', prompt: 'no onion and no garlic' },
+    { id: 'kid', label: 'Kid Friendly', prompt: 'kid friendly and mild spice' },
+];
+
 const RecipeHub = () => {
   const [activeTab, setActiveTab] = useState<'search' | 'diet' | 'ready' | 'facts'>('search');
   const [inputValue, setInputValue] = useState('');
@@ -68,10 +80,27 @@ const RecipeHub = () => {
   const [, setCurrentFact] = useState(0);
   const [selectedRecipe, setSelectedRecipe] = useState<any | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [aiMode, setAiMode] = useState('balanced');
+  const [swapIdeas, setSwapIdeas] = useState<string[]>([]);
+  const [wasteTips, setWasteTips] = useState<string[]>([]);
+  const [pantryPlan, setPantryPlan] = useState<any[]>([]);
 
   useEffect(() => {
     const interval = setInterval(() => setCurrentFact((p) => (p + 1) % FOOD_FACTS.length), 4000);
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const seed = localStorage.getItem(RECIPE_SEED_KEY);
+      if (seed) {
+        setInputValue(seed);
+        setActiveTab('search');
+        localStorage.removeItem(RECIPE_SEED_KEY);
+      }
+    } catch {
+      // ignore localStorage errors
+    }
   }, []);
 
   useEffect(() => {
@@ -99,62 +128,55 @@ const RecipeHub = () => {
         return;
     }
 
-    if (!GEMINI_API_KEY || GEMINI_API_KEY.includes("PASTE_YOUR")) return toast.error("Gemini API Key missing!");
+    if (!isGeminiConfigured()) return toast.error("Gemini API Key missing!");
 
     setLoading(true);
     setRecipes([]); 
+    setSwapIdeas([]);
+    setWasteTips([]);
+    setPantryPlan([]);
     
     try {
-      const modelsResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`);
-      const modelsData = await modelsResponse.json();
-      
-      if (modelsData.error) throw new Error(modelsData.error.message);
-
-      const validModel = modelsData.models?.find((m: any) => 
-        m.supportedGenerationMethods?.includes("generateContent") && !m.name.includes("vision")
-      );
-
-      if (!validModel) throw new Error("No text model found.");
-
-      const modelName = validModel.name.replace("models/", "");
-
+      const selectedMode = AI_MODES.find((mode) => mode.id === aiMode);
+      const modePrompt = selectedMode?.prompt ?? 'balanced homestyle';
       let promptText = "";
       if (activeTab === 'search') {
-        promptText = `Act as an Indian Chef. User has these ingredients: ${inputValue}. 
-        Suggest 2 detailed, tasty recipes. 
-        Return ONLY valid JSON (no markdown): 
-        [ { "title": "Recipe Name", "time": "30 mins", "calories": "400 kcal", "tags": ["Spicy", "Lunch"], "ingredients": ["Item 1", "Item 2"], "instructions": ["Step 1", "Step 2"] } ]`;
+        promptText = `Act as an Indian Chef. User has these ingredients: ${inputValue}. Style: ${modePrompt}.
+        Suggest 2 detailed, tasty recipes. Also add smart swaps and waste-saving tips.
+        Return ONLY valid JSON (no markdown):
+        {
+          "recipes": [ { "title": "Recipe Name", "time": "30 mins", "calories": "400 kcal", "tags": ["Spicy", "Lunch"], "ingredients": ["Item 1", "Item 2"], "instructions": ["Step 1", "Step 2"] } ],
+          "smart_swaps": ["Swap idea 1", "Swap idea 2", "Swap idea 3"],
+          "waste_saver_tips": ["Tip 1", "Tip 2", "Tip 3"],
+          "pantry_plan": [ { "title": "Meal Name", "time": "15 mins", "calories": "300 kcal", "tags": ["Breakfast"], "ingredients": ["Item 1"], "instructions": ["Step 1"] } ]
+        }`;
       } else {
-        promptText = `Act as a Desi Nutritionist. Goal: ${inputValue}. Create 1-day meal plan (3 meals). 
-        Return ONLY valid JSON (no markdown): 
-        [ { "title": "Meal Name", "time": "15 mins", "calories": "300 kcal", "tags": ["Breakfast"], "ingredients": ["Item 1"], "instructions": ["Step 1"] } ]`;
+        promptText = `Act as a Desi Nutritionist. Goal: ${inputValue}. Style: ${modePrompt}. Create 1-day meal plan (3 meals) with smart swaps and waste-saving tips.
+        Return ONLY valid JSON (no markdown):
+        {
+          "recipes": [ { "title": "Meal Name", "time": "15 mins", "calories": "300 kcal", "tags": ["Breakfast"], "ingredients": ["Item 1"], "instructions": ["Step 1"] } ],
+          "smart_swaps": ["Swap idea 1", "Swap idea 2"],
+          "waste_saver_tips": ["Tip 1", "Tip 2", "Tip 3"],
+          "pantry_plan": [ { "title": "Meal Name", "time": "15 mins", "calories": "300 kcal", "tags": ["Snack"], "ingredients": ["Item 1"], "instructions": ["Step 1"] } ]
+        }`;
       }
 
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contents: [{ parts: [{ text: promptText }] }] })
-        }
-      );
-
-      const data = await response.json();
-      if (data.error) throw new Error(data.error.message);
-
-      const text = data.candidates[0].content.parts[0].text;
-      const jsonString = text.replace(/```json|```/g, "").trim();
-      
-      setRecipes(JSON.parse(jsonString));
-      toast.success("Lo ji, khana taiyaar! 🥘");
+      const data = await generateJson<any>({ prompt: promptText, maxOutputTokens: 900 });
+      const list = Array.isArray(data) ? data : Array.isArray(data?.recipes) ? data.recipes : [];
+      setRecipes(list);
+      setSwapIdeas(Array.isArray(data?.smart_swaps) ? data.smart_swaps.slice(0, 5) : []);
+      setWasteTips(Array.isArray(data?.waste_saver_tips) ? data.waste_saver_tips.slice(0, 5) : []);
+      setPantryPlan(Array.isArray(data?.pantry_plan) ? data.pantry_plan.slice(0, 4) : []);
+      toast.success("Lo ji, khana taiyaar!");
 
     } catch (error: any) {
       console.error(error);
-      if (error.message && error.message.includes("429")) {
-        setStatusMsg("❌ Chef is busy (Quota Limit). Wait 1 min.");
+      const message = String(error?.message || '');
+      if (message.includes("429")) {
+        setStatusMsg("Chef is busy (Quota Limit). Wait 1 min.");
         toast.error("Too many requests! Wait a bit.");
       } else {
-        setStatusMsg("❌ Chef thoda confused hai. Phir se try karo.");
+        setStatusMsg("Chef thoda confused hai. Phir se try karo.");
         toast.error("Error connecting to Chef.");
       }
     } finally {
@@ -180,7 +202,7 @@ const RecipeHub = () => {
     
     let imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?nologo=true&seed=${seed}&model=dreamshaper&enhance=true`;
     
-    if (POLLINATIONS_KEY && !POLLINATIONS_KEY.includes("PASTE_YOUR")) {
+    if (hasPollinationsKey) {
         imageUrl += `&token=${POLLINATIONS_KEY}`;
     }
 
@@ -195,6 +217,9 @@ const RecipeHub = () => {
       setActiveTab(tab);
       setRecipes([]);
       setInputValue("");
+      setSwapIdeas([]);
+      setWasteTips([]);
+      setPantryPlan([]);
       setMobileMenuOpen(false); 
   };
 
@@ -215,7 +240,7 @@ const RecipeHub = () => {
         </button>
       </header>
 
-      <div className="flex flex-1 relative z-10 max-w-7xl mx-auto w-full">
+      <div className="flex flex-1 relative z-10 max-w-[1400px] mx-auto w-full">
         
         {/* SIDEBAR (Desktop) */}
         <aside className={`
@@ -256,7 +281,7 @@ const RecipeHub = () => {
         <main className="flex-1 p-4 md:p-8 overflow-hidden">
             
             {(activeTab === 'search' || activeTab === 'diet') && (
-                <div className="max-w-4xl mx-auto">
+                <div className="max-w-6xl mx-auto">
                     <div className="text-center mb-10">
                         <h2 className="text-4xl font-black mb-4">
                             {activeTab === 'search' ? "Fridge mein kya pada hai?" : "Fitness Goal kya hai boss?"}
@@ -276,6 +301,27 @@ const RecipeHub = () => {
                         </NeoButton>
                         </div>
                     </div>
+                    <div className="mt-4 bg-white border-2 border-black rounded-2xl px-4 py-3 shadow-neo">
+                        <div className="flex items-center justify-center gap-2 text-xs font-black uppercase text-gray-500 mb-2">
+                            <Sparkles size={14} className="text-yellow-500" /> AI Modes
+                        </div>
+                        <div className="flex flex-wrap justify-center gap-2">
+                            {AI_MODES.map((mode) => (
+                                <button
+                                    key={mode.id}
+                                    type="button"
+                                    onClick={() => setAiMode(mode.id)}
+                                    className={`px-3 py-1.5 rounded-full border-2 border-black text-xs font-black transition-all ${
+                                        aiMode === mode.id
+                                            ? 'bg-yellow-300 shadow-neo translate-y-[1px]'
+                                            : 'bg-white hover:bg-gray-50'
+                                    }`}
+                                >
+                                    {mode.label}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
 
                     {loading && (
                         <div className="flex flex-col items-center justify-center py-10">
@@ -283,18 +329,62 @@ const RecipeHub = () => {
                             <p className="font-black text-2xl text-dark text-center px-4">{statusMsg}</p>
                         </div>
                     )}
+                    {!loading && (swapIdeas.length > 0 || wasteTips.length > 0 || pantryPlan.length > 0) && (
+                        <div className="grid md:grid-cols-3 gap-6 mb-10">
+                            <div className="bg-white border-4 border-black rounded-2xl p-5 shadow-neo">
+                                <div className="flex items-center gap-2 mb-3">
+                                    <Shuffle size={18} className="text-blue-600" />
+                                    <h3 className="text-lg font-black">Smart Swaps</h3>
+                                </div>
+                                <ul className="space-y-2 text-sm font-bold text-gray-700">
+                                    {(swapIdeas.length ? swapIdeas : ["No swaps yet. Try another input."]).slice(0, 4).map((tip, idx) => (
+                                        <li key={idx} className="bg-gray-50 border-2 border-black rounded-lg px-3 py-2">
+                                            {tip}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                            <div className="bg-white border-4 border-black rounded-2xl p-5 shadow-neo">
+                                <div className="flex items-center gap-2 mb-3">
+                                    <Leaf size={18} className="text-green-600" />
+                                    <h3 className="text-lg font-black">Waste Saver Tips</h3>
+                                </div>
+                                <ul className="space-y-2 text-sm font-bold text-gray-700">
+                                    {(wasteTips.length ? wasteTips : ["No tips yet. Add more ingredients."]).slice(0, 4).map((tip, idx) => (
+                                        <li key={idx} className="bg-gray-50 border-2 border-black rounded-lg px-3 py-2">
+                                            {tip}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                            <div className="bg-white border-4 border-black rounded-2xl p-5 shadow-neo">
+                                <div className="flex items-center gap-2 mb-3">
+                                    <Sparkles size={18} className="text-yellow-500" />
+                                    <h3 className="text-lg font-black">Mini Pantry Plan</h3>
+                                </div>
+                                <div className="space-y-2 text-sm font-bold text-gray-700">
+                                    {(pantryPlan.length ? pantryPlan : [{ title: 'Plan will appear here' }]).slice(0, 4).map((meal: any, idx: number) => (
+                                        <div key={idx} className="bg-gray-50 border-2 border-black rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+                                            <span className="truncate">{meal.title || 'Meal idea'}</span>
+                                            {meal.time && <span className="text-[10px] uppercase text-gray-500">{meal.time}</span>}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             )}
 
             {activeTab === 'ready' && (
-                <div className="max-w-4xl mx-auto">
+                <div className="max-w-6xl mx-auto">
                     <h2 className="text-4xl font-black mb-2 flex items-center gap-2"><Zap className="text-green-600" fill="currentColor"/> Quick & Ready Recipes</h2>
                     <p className="font-bold text-gray-500 mb-8">Minimum Food Waste. Maximum Taste. 15 Mins Only.</p>
                 </div>
             )}
 
             {activeTab === 'facts' && (
-                <div className="max-w-4xl mx-auto">
+                <div className="max-w-6xl mx-auto">
                     <h2 className="text-4xl font-black mb-2 flex items-center gap-2"><Lightbulb className="text-yellow-500" fill="currentColor"/> Did You Know?</h2>
                     <p className="font-bold text-gray-500 mb-8">Interesting facts about food and sustainability.</p>
                     
@@ -309,7 +399,7 @@ const RecipeHub = () => {
                 </div>
             )}
 
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8 max-w-6xl mx-auto relative z-10 pb-20">
+            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8 max-w-[1400px] mx-auto relative z-10 pb-20">
                 {(activeTab === 'ready' ? READY_RECIPES : recipes).map((recipe, index) => (
                     <motion.div 
                         key={index}

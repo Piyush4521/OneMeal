@@ -19,6 +19,7 @@ export const NeoButton = ({ children, variant = "primary", className, ...props }
         ${bgColors[variant]} 
         border-2 border-dark rounded-xl px-6 py-3 font-bold text-lg
         shadow-neo transition-all flex items-center gap-2 justify-center
+        focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-dark focus-visible:ring-offset-2
         ${className || ""}
       `}
       {...props}

@@ -6,6 +6,8 @@ import { NeoButton } from '../components/ui/NeoButton';
 import { db, auth } from '../firebase';
 import { collection, query, where, onSnapshot, doc, updateDoc } from 'firebase/firestore';
 import toast from 'react-hot-toast';
+import { generateText, isGeminiConfigured } from '../lib/aiClient';
+import { openChat } from '../lib/chatEvents';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import L from 'leaflet';
@@ -50,6 +52,25 @@ const calculateDistance = (lat1: number, lon1: number, lat2: number, lon2: numbe
     return Number((R * c).toFixed(1)); 
 };
 
+const toDateSafe = (timestamp: any) => {
+    if(!timestamp) return null;
+    if(timestamp instanceof Date) return timestamp;
+    if(typeof timestamp === 'number') return new Date(timestamp);
+    if(typeof timestamp === 'string') {
+        const parsed = new Date(timestamp);
+        return isNaN(parsed.getTime()) ? null : parsed;
+    }
+    if(timestamp.toDate) return timestamp.toDate();
+    if(typeof timestamp.seconds === 'number') return new Date(timestamp.seconds * 1000);
+    return null;
+};
+
+const formatShortTime = (timestamp: any) => {
+    const date = toDateSafe(timestamp);
+    if(!date) return 'Unknown';
+    return date.toLocaleDateString('en-IN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
+
 function MapUpdater({ center }: { center: { lat: number, lng: number } | null }) {
     const map = useMap();
     useEffect(() => {
@@ -68,6 +89,9 @@ const ReceiverDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [ngoLocation, setNgoLocation] = useState<{lat: number, lng: number} | null>(null);
   const [selectedDonation, setSelectedDonation] = useState<string | null>(null);
+  const [aiPickups, setAiPickups] = useState<string[]>([]);
+  const [aiPickupsLoading, setAiPickupsLoading] = useState(false);
+  const [aiPickupsError, setAiPickupsError] = useState<string | null>(null);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -88,7 +112,7 @@ const ReceiverDashboard = () => {
   }, []);
 
   useEffect(() => {
-    const q = query(collection(db, "donations"), where("status", "==", "available"));
+    const q = query(collection(db, "donations"), where("status", "in", ["available", "on_way"]));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const foodData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setDonations(foodData);
@@ -103,7 +127,7 @@ const ReceiverDashboard = () => {
       const q = query(collection(db, "donations"), where("status", "in", ["claimed", "completed"]));
       const unsubscribe = onSnapshot(q, (snapshot) => {
           const allClaims = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-          const myData = allClaims.filter((d:any) => d.claimedBy === auth.currentUser?.displayName || d.claimedBy === "NGO"); 
+          const myData = allClaims.filter((d:any) => d.claimedById === auth.currentUser?.uid || d.claimedBy === auth.currentUser?.displayName || d.claimedBy === "NGO"); 
           setMyClaims(myData);
       });
       return () => unsubscribe();
@@ -119,11 +143,63 @@ const ReceiverDashboard = () => {
 
   const activePickups = myClaims.filter(d => d.status === 'claimed');
   const historyPickups = myClaims.filter(d => d.status === 'completed');
+  const hasAi = isGeminiConfigured();
+
+  const parseAiLines = (text: string) =>
+    text
+      .split('\n')
+      .map((line) => line.replace(/^[-*]\s?/, '').trim())
+      .filter(Boolean)
+      .slice(0, 4);
 
   const handleLogout = () => {
     auth.signOut();
     navigate('/');
     toast.success("Logged out.");
+  };
+
+  const handleAiPickups = async () => {
+    if (!hasAi) {
+      toast.error('AI tips need VITE_GEMINI_API_KEY.');
+      return;
+    }
+    if (sortedDonations.length === 0) {
+      setAiPickups([]);
+      setAiPickupsError('No donations available for AI picks.');
+      return;
+    }
+
+    setAiPickupsLoading(true);
+    setAiPickupsError(null);
+    setAiPickups([]);
+
+    try {
+      const list = sortedDonations.slice(0, 6).map((item, idx) => {
+        const distance = typeof item.distance === 'number' ? `${item.distance} km` : 'unknown distance';
+        return `#${idx + 1} ${item.foodItem || 'Food'} | qty: ${item.quantity || 'unknown'} | ${distance} | ${item.pickupPreference || 'asap'} | ${item.address || 'no address'}`;
+      }).join('\n');
+
+      const prompt = [
+        'You help an NGO decide which food pickup to claim.',
+        'Pick top 3 from the list with short reasons.',
+        'Return exactly 3 lines starting with "- ".',
+        list,
+      ].join('\n');
+
+      const reply = await generateText({ prompt, maxOutputTokens: 160 });
+      const picks = parseAiLines(reply);
+      if (!picks.length) {
+        setAiPickupsError('AI did not return picks. Try again.');
+      } else {
+        setAiPickups(picks);
+      }
+    } catch (error) {
+      console.error('AI pickup error:', error);
+      setAiPickups([]);
+      setAiPickupsError('AI picks failed. Please retry.');
+    } finally {
+      setAiPickupsLoading(false);
+    }
   };
 
   return (
@@ -182,6 +258,50 @@ const ReceiverDashboard = () => {
                         <div className="flex justify-between items-center mb-2">
                             <h2 className="text-xl font-black flex items-center gap-2">Available <span className="bg-dark text-white px-2 rounded-full text-sm">{sortedDonations.length}</span></h2>
                         </div>
+
+                        <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4">
+                            <div className="flex items-center justify-between gap-3">
+                                <div>
+                                    <p className="text-xs font-black uppercase text-blue-800">AI Best Picks</p>
+                                    <p className="text-xs font-bold text-gray-600">Get top pickups based on distance and freshness.</p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <NeoButton
+                                        onClick={handleAiPickups}
+                                        disabled={!hasAi || aiPickupsLoading}
+                                        className="px-3 py-2 text-xs"
+                                    >
+                                        {aiPickupsLoading ? 'Thinking...' : 'Suggest'}
+                                    </NeoButton>
+                                    <button
+                                        type="button"
+                                        onClick={() => openChat('Suggest best pickup strategy for an NGO on OneMeal.')}
+                                        className="text-[10px] font-bold px-2 py-1 border-2 border-dark rounded-lg bg-white hover:bg-gray-50"
+                                    >
+                                        Ask AI
+                                    </button>
+                                </div>
+                            </div>
+
+                            {!hasAi && (
+                                <p className="mt-2 text-[10px] font-bold text-red-600">
+                                    Add <span className="font-black">VITE_GEMINI_API_KEY</span> in <code>.env</code> to enable.
+                                </p>
+                            )}
+                            {aiPickupsError && (
+                                <p className="mt-2 text-[10px] font-bold text-red-600">{aiPickupsError}</p>
+                            )}
+                            {aiPickups.length > 0 && (
+                                <ul className="mt-2 space-y-1 text-[11px] font-bold text-gray-700">
+                                    {aiPickups.map((pick, idx) => (
+                                        <li key={`${pick}-${idx}`} className="flex items-start gap-2">
+                                            <span className="mt-1 h-2 w-2 rounded-full bg-blue-600" />
+                                            <span>{pick}</span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
                         
                         {loading ? (
                              <div className="space-y-4">
@@ -219,7 +339,7 @@ const ReceiverDashboard = () => {
                                 zoom={13} 
                                 style={{ height: "100%", width: "100%" }}
                             >
-                                <TileLayer attribution='© OpenStreetMap' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+                                <TileLayer attribution="&copy; OpenStreetMap" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
                                 <Marker position={[ngoLocation.lat, ngoLocation.lng]} icon={UserIcon}>
                                     <Popup><b>You are here</b></Popup>
                                 </Marker>
@@ -269,8 +389,14 @@ const ReceiverDashboard = () => {
                                     <div className="absolute -top-3 -right-3 bg-red-500 text-white font-black px-3 py-1 rounded-full border-2 border-black animate-pulse">
                                         OTP: {item.otp}
                                     </div>
-                                    <h3 className="font-black text-xl mb-1">{item.foodItem}</h3>
-                                    <p className="text-gray-700 font-medium text-sm mb-4">{item.quantity} • {item.address}</p>
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <h3 className="font-black text-xl">{item.foodItem}</h3>
+                                        <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${item.pickupPreference === 'flexible' ? 'bg-purple-100 text-purple-700 border-purple-200' : 'bg-blue-100 text-blue-700 border-blue-200'}`}>
+                                            {item.pickupPreference === 'flexible' ? 'FLEXIBLE' : 'ASAP'}
+                                        </span>
+                                    </div>
+                                    <p className="text-gray-700 font-medium text-sm mb-2">{item.quantity} - {item.address}</p>
+                                    <p className="text-xs font-bold text-gray-500 mb-3">Listed: {formatShortTime(item.createdAt || item.createdAtClient)}</p>
                                     
                                     <div className="bg-white p-3 rounded-xl border-2 border-yellow-200">
                                         <p className="text-xs font-bold text-gray-500 uppercase">Donor Phone</p>
@@ -294,8 +420,14 @@ const ReceiverDashboard = () => {
                         {historyPickups.map((item) => (
                              <div key={item.id} className="bg-white border-2 border-dark p-4 rounded-xl flex justify-between items-center shadow-sm">
                                 <div>
-                                    <h3 className="font-black text-lg">{item.foodItem}</h3>
+                                    <div className="flex items-center gap-2">
+                                        <h3 className="font-black text-lg">{item.foodItem}</h3>
+                                        <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${item.pickupPreference === 'flexible' ? 'bg-purple-100 text-purple-700 border-purple-200' : 'bg-blue-100 text-blue-700 border-blue-200'}`}>
+                                            {item.pickupPreference === 'flexible' ? 'FLEXIBLE' : 'ASAP'}
+                                        </span>
+                                    </div>
                                     <p className="text-gray-500 text-sm font-bold">{item.address}</p>
+                                    <p className="text-xs text-gray-400 font-bold">Listed: {formatShortTime(item.createdAt || item.createdAtClient)}</p>
                                 </div>
                                 <div className="flex items-center gap-2 bg-green-100 text-green-800 px-3 py-1 rounded-full text-xs font-black border border-green-200">
                                     <CheckCircle size={14}/> COMPLETED
@@ -320,6 +452,8 @@ const FoodCard = ({ data, ngoLocation, isSelected, onFocus }: any) => {
   const [claimed, setClaimed] = useState(false);
   const [reporting, setReporting] = useState(false); 
   const cardRef = useRef<HTMLDivElement>(null);
+  const isOnWay = data?.status === 'on_way';
+  const claimDisabled = claimed || reporting || isOnWay;
 
   useEffect(() => {
     if (isSelected && cardRef.current) {
@@ -331,15 +465,24 @@ const FoodCard = ({ data, ngoLocation, isSelected, onFocus }: any) => {
     ? calculateDistance(ngoLocation.lat, ngoLocation.lng, data.location.lat, data.location.lng)
     : null;
 
-  const getTimeAgo = (timestamp: any) => {
-      if (!timestamp) return "Just now";
-      const seconds = Math.floor((new Date().getTime() - timestamp.toDate().getTime()) / 1000);
+  const getTimeAgo = (timestamp: any, fallback?: any) => {
+      const date = toDateSafe(timestamp) || toDateSafe(fallback);
+      if (!date) return "Just now";
+      const seconds = Math.floor((new Date().getTime() - date.getTime()) / 1000);
       if (seconds < 60) return `${seconds}s ago`;
       const minutes = Math.floor(seconds / 60);
-      return `${Math.floor(minutes / 60)}h ago`;
+      if (minutes < 60) return `${minutes}m ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours}h ago`;
+      const days = Math.floor(hours / 24);
+      return `${days}d ago`;
   };
 
   const handleClaim = async () => {
+    if (data?.status !== 'available') {
+      toast.error('Pickup already in progress.');
+      return;
+    }
     try {
         setClaimed(true);
         const otpCode = Math.floor(1000 + Math.random() * 9000).toString();
@@ -347,10 +490,11 @@ const FoodCard = ({ data, ngoLocation, isSelected, onFocus }: any) => {
         await updateDoc(foodRef, {
             status: "claimed",
             claimedBy: auth.currentUser?.displayName || "NGO",
+            claimedById: auth.currentUser?.uid || null,
             claimedAt: new Date(),
             otp: otpCode 
         });
-        toast.success(`Claimed! check 'My Pickups'`, { duration: 4000, icon: '🎉' });
+        toast.success(`Claimed! check 'My Pickups'`, { duration: 4000, icon: '!' });
     } catch (error) {
         console.error("Error claiming:", error);
         setClaimed(false);
@@ -370,6 +514,7 @@ const FoodCard = ({ data, ngoLocation, isSelected, onFocus }: any) => {
           toast.error("Donation reported.");
       } catch (e) {
           toast.error("Error reporting.");
+      } finally {
           setReporting(false);
       }
   };
@@ -389,6 +534,8 @@ const FoodCard = ({ data, ngoLocation, isSelected, onFocus }: any) => {
         onClick={onFocus}
         layout
         initial={{ scale: 0.9, opacity: 0 }}
+        whileHover={{ y: -4 }}
+        transition={{ type: 'spring', stiffness: 260, damping: 20 }}
         animate={{ 
             scale: isSelected ? 1.02 : 1, 
             opacity: 1,
@@ -402,7 +549,7 @@ const FoodCard = ({ data, ngoLocation, isSelected, onFocus }: any) => {
           </div>
       )}
       
-      <div className="absolute top-2 right-2">
+      <div className="absolute top-2 right-2 flex flex-col gap-1 items-end">
          {data.foodType === 'non-veg' ? (
              <span className="flex items-center gap-1 bg-red-100 text-red-700 border border-red-200 px-2 py-0.5 rounded-full text-[10px] font-black">
                 <Beef size={10} /> NON-VEG
@@ -412,12 +559,20 @@ const FoodCard = ({ data, ngoLocation, isSelected, onFocus }: any) => {
                 <Leaf size={10} /> VEG
              </span>
          )}
+         {isOnWay && (
+             <span className="flex items-center gap-1 bg-blue-100 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-full text-[10px] font-black">
+                <Navigation size={10} /> ON WAY
+             </span>
+         )}
+         <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${data.pickupPreference === 'flexible' ? 'bg-purple-100 text-purple-700 border-purple-200' : 'bg-blue-100 text-blue-700 border-blue-200'}`}>
+            {data.pickupPreference === 'flexible' ? 'FLEXIBLE' : 'ASAP'}
+         </span>
       </div>
 
       <h3 className="font-black text-xl mb-1 pr-16 mt-5">{data.foodItem}</h3>
       <p className="text-gray-700 font-bold mb-3 text-sm flex items-center gap-2">
          <span className="bg-gray-100 px-2 py-0.5 rounded text-dark border border-gray-300 text-xs">Qty: {data.quantity}</span>
-         <span className="text-gray-400 text-xs">• {data.donorName}</span>
+         <span className="text-gray-400 text-xs">- {data.donorName}</span>
       </p>
 
       <div className="flex items-start gap-2 text-sm font-medium text-gray-600 mb-3 bg-gray-50 p-2 rounded border border-gray-200">
@@ -425,8 +580,9 @@ const FoodCard = ({ data, ngoLocation, isSelected, onFocus }: any) => {
          <span className="line-clamp-2 leading-tight">{data.address}</span>
       </div>
 
-      <div className="flex gap-3 text-xs font-bold text-gray-400 mb-4">
-        <span className="flex items-center gap-1"><Clock size={12} /> {getTimeAgo(data.createdAt)}</span>
+      <div className="flex flex-wrap gap-3 text-xs font-bold text-gray-400 mb-4">
+        <span className="flex items-center gap-1"><Clock size={12} /> {getTimeAgo(data.createdAt, data.createdAtClient)}</span>
+        <span>Listed: {formatShortTime(data.createdAt || data.createdAtClient)}</span>
       </div>
       
       <div className="grid grid-cols-5 gap-2">
@@ -454,10 +610,10 @@ const FoodCard = ({ data, ngoLocation, isSelected, onFocus }: any) => {
           
           <NeoButton 
             onClick={(e) => { e.stopPropagation(); handleClaim(); }} 
-            disabled={claimed || reporting}
-            className={`col-span-2 w-full text-sm py-2 flex items-center justify-center gap-2 h-10 ${claimed ? 'bg-gray-300 border-gray-500 text-gray-600 shadow-none' : ''}`}
+            disabled={claimDisabled}
+            className={`col-span-2 w-full text-sm py-2 flex items-center justify-center gap-2 h-10 ${claimDisabled ? 'bg-gray-300 border-gray-500 text-gray-600 shadow-none' : ''}`}
           >
-            {claimed ? <LockKeyhole size={16}/> : <>Claim <ArrowRight size={16}/></>}
+            {isOnWay ? <><LockKeyhole size={16}/> On Way</> : claimed ? <LockKeyhole size={16}/> : <>Claim <ArrowRight size={16}/></>}
           </NeoButton>
       </div>
     </motion.div>
