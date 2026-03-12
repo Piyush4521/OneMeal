@@ -1,92 +1,162 @@
-# 🥗 OneMeal - AI-Powered Food Donation Platform
+# OneMeal
 
-> **Bridging the gap between surplus food and those in need with AI & Geo-tracking.**
+OneMeal is a Firebase-backed food donation app with donor, NGO, volunteer, admin, and recipe flows. The frontend is a Vite/React app; privileged actions are now backed by Firestore rules and Firebase Functions instead of trusting the browser.
 
-OneMeal is a next-generation food donation system designed to minimize food waste and optimize distribution. It uses **Google Gemini AI** for food quality assessment and recipe generation, while ensuring seamless connectivity between Donors, NGOs, and Receivers via **Real-time Geolocation**.
+## What it does
 
----
+- Donors list food donations with AI-assisted food-image validation and packing tips.
+- NGOs claim available donations, receive a server-generated OTP, and report bad listings with a reason.
+- Volunteers can accept, complete, or release pickups through callable backend actions.
+- Admins manage users, issues, announcements, donations, and money pledges.
+- Recipe Hub generates recipe ideas from pantry items or diet goals.
 
-## 🚀 Key Features
+## Important implementation notes
 
-* **🤖 AI-Powered Quality Check:** Uses **Google Gemini API** to analyze uploaded food images, detecting freshness and estimating shelf life.
-* **🍲 Smart Recipe Generation:** Suggests nutrition-aware recipes based on donated ingredients using GenAI.
-* **🌍 Multi-Language Support:** Fully accessible in **Hindi & Marathi** using the **Google Translate API** for local community inclusion.
-* **📍 Real-Time Tracking:** Live location tracking of donations and volunteers using **React Leaflet (OpenStreetMap)**.
-* **🎨 Neo-Brutalism UI:** A bold, high-contrast design style using **Tailwind CSS** for maximum accessibility and modern aesthetics.
-* **🔐 Secure & Scalable:** Powered by **Firebase Authentication** & **Firestore** for real-time data handling.
+- Gemini is proxied through Firebase Functions. The browser no longer uses a client-side `VITE_GEMINI_API_KEY`.
+- Admin access is expected to come from Firebase custom claims.
+- The image check is a food/not-food classifier. It does not estimate freshness or shelf life.
+- Localization currently uses the Google Translate widget. There is no `VITE_GOOGLE_TRANSLATE_KEY` in the app.
+- “Donate Money” is a pledge flow. Entries stay `pledged` until a real payment flow exists.
 
----
+## Tech stack
 
-## 🛠️ Tech Stack
+- React 18 + Vite + TypeScript
+- Firebase Auth, Firestore, Functions
+- Tailwind CSS + Framer Motion
+- React Leaflet / OpenStreetMap
+- Vitest for unit tests
 
-### **Frontend**
-* **Framework:** React.js (Vite)
-* **Language:** TypeScript (Strict Type Safety)
-* **Styling:** Tailwind CSS (Neo-Brutalism Theme)
-* **Animations:** Framer Motion
-* **Icons:** Lucide React
+## Frontend setup
 
-### **Backend & Database**
-* **Auth:** Firebase Authentication (Secure Login/Signup)
-* **Database:** Firebase Firestore (NoSQL Real-time DB)
+1. Install dependencies:
 
-### **Artificial Intelligence**
-* **Vision & NLP:** Google Gemini API (Freshness Detection & Recipes)
-* **Localization:** Google Translate API
+```bash
+nvm use 20
+npm install
+```
 
-### **Tools & Utilities**
-* **Maps:** React Leaflet
-* **Notifications:** React Hot Toast
-* **Routing:** React Router DOM
+2. Create `.env` in the project root:
 
----
+```env
+VITE_FIREBASE_API_KEY=your_firebase_api_key
+VITE_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
+VITE_FIREBASE_PROJECT_ID=your-project-id
+VITE_FIREBASE_STORAGE_BUCKET=your-project.appspot.com
+VITE_FIREBASE_MESSAGING_SENDER_ID=your_sender_id
+VITE_FIREBASE_APP_ID=your_app_id
+VITE_FIREBASE_MEASUREMENT_ID=your_measurement_id
+VITE_GEMINI_TEXT_MODEL=gemini-1.5-flash
+VITE_GEMINI_VISION_MODEL=gemini-1.5-flash
+VITE_POLLINATIONS_KEY=optional_pollinations_key
+VITE_USE_FIREBASE_EMULATORS=false
+VITE_FIREBASE_EMULATOR_HOST=127.0.0.1
+VITE_FIREBASE_AUTH_EMULATOR_PORT=9099
+VITE_FIRESTORE_EMULATOR_PORT=8080
+VITE_FIREBASE_FUNCTIONS_EMULATOR_PORT=5001
+```
 
-## 📸 Screenshots
+3. Run the app:
 
+```bash
+npm run dev
+```
 
-| overall UI |
-  ![Landing Page](./screenshots/home.png)
-  ![NGO](./screenshots/ngo.png) 
-  ![Donar](./screenshots/donar.png)
-  ![recipehub](./screenshots/recipe.png)
-  ![Admin](./screenshots/admin.png)
-  ![Leaderboard](./screenshots/karma.png)
+## Functions setup
 
+1. Install Functions dependencies:
 
+```bash
+npm --prefix functions install
+```
 
+2. Set the Gemini secret for Functions:
 
----
+```bash
+firebase functions:secrets:set GEMINI_API_KEY
+```
 
-## ⚙️ Installation & Setup
+3. Optional `functions/.env` for model names:
 
-1.  **Clone the repository**
-    ```bash
-    git clone [https://github.com/Piyush4521/onemeal.git](https://github.com/Piyush4521/onemeal.git)
-    cd onemeal
-    ```
+```bash
+GEMINI_TEXT_MODEL=gemini-1.5-flash
+GEMINI_VISION_MODEL=gemini-1.5-flash
+```
 
-2.  **Install dependencies**
-    ```bash
-    npm install
-    ```
+4. Deploy rules + functions:
 
-3.  **Configure Environment Variables**
-    Create a `.env` file in the root directory and add your keys:
-    ```env
-    VITE_FIREBASE_API_KEY=your_firebase_api_key
-    VITE_GEMINI_API_KEY=your_gemini_api_key
-    VITE_GOOGLE_TRANSLATE_KEY=your_translate_key
-    ```
+```bash
+firebase deploy --only firestore:rules,functions,hosting
+```
 
-4.  **Run the development server**
-    ```bash
-    npm run dev
-    ```
+## Emulator setup
 
----
+Use Node 20 locally so the Functions emulator matches the configured runtime:
 
-## 🤝 Contribution
-Contributions are welcome! Please feel free to submit a Pull Request.
+```bash
+nvm use 20
+npm install
+npm --prefix functions install
+```
 
----
-*Built with ❤️ by [Piyush] for a hunger-free world.*
+If your machine default Java is newer and the Firestore emulator is unstable, point the scripts at a Java 21 runtime:
+
+```bash
+$env:ONEMEAL_JAVA_HOME="C:\\path\\to\\jdk-21-or-jre-21"
+```
+
+Run the emulator-backed test suite:
+
+```bash
+npm run test
+```
+
+Inspect the emulators manually:
+
+```bash
+npm run emulators:start
+```
+
+Run the frontend against the local emulators by setting `VITE_USE_FIREBASE_EMULATORS=true` before `npm run dev`.
+
+## Admin bootstrap
+
+Grant the admin custom claim with Application Default Credentials or a service account:
+
+```bash
+$env:GOOGLE_APPLICATION_CREDENTIALS="C:\\path\\to\\service-account.json"
+npm --prefix functions run set-admin -- admin@example.com
+```
+
+This script sets the Firebase Auth custom claim and syncs the Firestore `users/{uid}` profile.
+
+## Optional legacy backfill
+
+If you have pre-refactor production data, run the dry-run first:
+
+```bash
+npm --prefix functions run backfill:release
+```
+
+Apply it only after reviewing the planned changes:
+
+```bash
+npm --prefix functions run backfill:release -- --write
+```
+
+## Scripts
+
+```bash
+npm run dev
+npm run build
+npm run lint
+npm run test
+npm run test:unit
+npm run test:emulators
+npm run check:functions
+```
+
+## Repo structure
+
+- `src/` frontend app
+- `functions/` Firebase callable backend
+- `firestore.rules` authorization rules

@@ -7,10 +7,15 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "npm run test:unit && npm run test:emulators",
+    "test:unit": "vitest run",
+    "test:emulators": "node scripts/run-emulator-tests.cjs",
+    "test:emulators:debug": "npm run emulators:start",
+    "emulators:start": "node scripts/start-emulators.cjs",
+    "check:functions": "node --check functions/index.js"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
     "@types/leaflet": "^1.9.21",
     "firebase": "^12.7.0",
     "framer-motion": "^11.13.1",
@@ -23,13 +28,26 @@
     "react-router-dom": "^7.0.2"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.0",
+    "@eslint/js": "^9.22.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.3.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
+    "eslint": "^9.22.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.19",
+    "firebase-admin": "^13.5.0",
+    "firebase-tools": "^14.20.0",
+    "globals": "^16.0.0",
+    "jsdom": "^26.0.0",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.16",
     "typescript": "~5.6.2",
-    "vite": "^6.0.1"
+    "typescript-eslint": "^8.26.1",
+    "vite": "^6.0.1",
+    "vitest": "^3.0.8"
   }
 }
