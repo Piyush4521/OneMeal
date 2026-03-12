@@ -29,11 +29,14 @@ import { Link, useNavigate } from 'react-router-dom';
 import { NeoButton } from '../components/ui/NeoButton';
 import foodImage from '../assets/img3.png';
 import { auth, db } from '../firebase';
-import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
-import { addDoc, collection, doc, getDocs, onSnapshot, query, serverTimestamp, where } from 'firebase/firestore';
+import { signOut } from 'firebase/auth';
+import { addDoc, collection, doc, onSnapshot, serverTimestamp } from 'firebase/firestore';
 import toast from 'react-hot-toast';
 import GoogleTranslate from '../components/GoogleTranslate';
 import { openChat } from '../lib/chatEvents';
+import { useAuthSession } from '../context/AuthContext';
+import { getLandingMetrics } from '../lib/backendClient';
+import { getDashboardPath } from '../lib/roles';
 
 type FoodLeader = {
   name: string;
@@ -62,51 +65,6 @@ const SHAPE_COLORS = ['bg-primary/20', 'bg-secondary/20', 'bg-accent/20'];
 const random = (min: number, max: number) => Math.random() * (max - min) + min;
 
 const numberFormatter = new Intl.NumberFormat('en-IN');
-
-const fallbackImpact: ImpactStats = {
-  donations: 240,
-  donors: 80,
-  meals: 1200,
-  foodKg: 480,
-};
-
-const fallbackFoodLeaders: FoodLeader[] = [
-  {
-    name: 'Aarav',
-    karma: 140,
-    donations: 14,
-    badge: 'Hunger Slayer',
-    message: 'Feeds 12 families every month.',
-  },
-  {
-    name: 'Meera',
-    karma: 90,
-    donations: 9,
-    badge: 'Food Ninja',
-    message: 'Zero waste for her entire cafe.',
-  },
-  {
-    name: 'Rohan',
-    karma: 60,
-    donations: 6,
-    badge: 'Food Hero',
-    message: 'Late-night pickups, always on time.',
-  },
-];
-
-const fallbackMoneyLeaders: MoneyLeader[] = [
-  { name: 'Kriti', amount: 12000, message: 'Fueling 200 meals this week.' },
-  { name: 'Dev', amount: 8500, message: 'Supporting volunteer travel costs.' },
-  { name: 'Sana', amount: 6000, message: 'Keeps the cold chain running.' },
-];
-
-const motivationLines = [
-  'Fast pickups, fresh meals.',
-  'Zero waste, maximum impact.',
-  'Community powered and verified.',
-  'Food saved, smiles delivered.',
-  'Built with heart and hustle.',
-];
 
 const galleryItems = [
   {
@@ -175,28 +133,26 @@ const useCountUp = (target: number, duration = 1200, decimals = 0) => {
   return value;
 };
 
-const parseQuantityKg = (value?: string) => {
+const toMillis = (value: unknown) => {
   if (!value) return 0;
-  const cleaned = value.toLowerCase();
-  const match = cleaned.match(/(\d+(?:\.\d+)?)/);
-  if (!match) return 0;
-  const amount = Number.parseFloat(match[1]);
-  if (!Number.isFinite(amount)) return 0;
-  if (/\bkg/.test(cleaned)) return amount;
-  if (/\b(g|gm|gram|grams)\b/.test(cleaned)) return amount / 1000;
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? 0 : parsed.getTime();
+  }
+  if (typeof (value as { toMillis?: () => number }).toMillis === 'function') {
+    return (value as { toMillis: () => number }).toMillis();
+  }
+  if (typeof (value as { seconds?: number }).seconds === 'number') {
+    return (value as { seconds: number }).seconds * 1000;
+  }
   return 0;
-};
-
-const getFoodBadge = (karma: number) => {
-  if (karma >= 120) return 'Hunger Slayer';
-  if (karma >= 70) return 'Food Ninja';
-  return 'Food Hero';
 };
 
 const LandingPage = () => {
   const navigate = useNavigate();
-  const [user, setUser] = useState<User | null>(null);
-  const [userRole, setUserRole] = useState<'donor' | 'receiver' | null>(null);
+  const { isBanned, loading: sessionLoading, role: userRole, user } = useAuthSession();
   const [foodLeaders, setFoodLeaders] = useState<FoodLeader[]>([]);
   const [moneyLeaders, setMoneyLeaders] = useState<MoneyLeader[]>([]);
   const [announcement, setAnnouncement] = useState('');
@@ -222,146 +178,58 @@ const LandingPage = () => {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  useEffect(() => {
-    if (!user) {
-      setUserRole(null);
-      return;
-    }
-    const unsubRole = onSnapshot(doc(db, 'users', user.uid), (snap) => {
-      const data = snap.data();
-      const role = data?.role;
-      if (role === 'receiver' || role === 'donor') {
-        setUserRole(role);
-      } else {
-        setUserRole('donor');
-      }
-    }, () => {
-      setUserRole('donor');
-    });
-    return () => unsubRole();
-  }, [user]);
-
-  useEffect(() => {
     const unsubAnnounce = onSnapshot(doc(db, 'system', 'global'), (docSnapshot) => {
-      if (docSnapshot.exists()) {
-        const data = docSnapshot.data();
-        if (data.active && data.message) {
-          if (data.createdAt) {
-            const now = new Date().getTime();
-            const createdTime = data.createdAt.toDate
-              ? data.createdAt.toDate().getTime()
-              : new Date(data.createdAt).getTime();
-            const hoursDiff = (now - createdTime) / (1000 * 60 * 60);
-
-            if (hoursDiff < 24) {
-              setAnnouncement(data.message);
-            } else {
-              setAnnouncement('');
-            }
-          } else {
-            setAnnouncement(data.message);
-          }
-        } else {
-          setAnnouncement('');
-        }
-      } else {
+      if (!docSnapshot.exists()) {
         setAnnouncement('');
+        return;
       }
+
+      const data = docSnapshot.data();
+      if (!data.active || !data.message) {
+        setAnnouncement('');
+        return;
+      }
+
+      const now = Date.now();
+      const expiresAt = toMillis(data.expiresAt);
+      const createdAt = toMillis(data.createdAt);
+
+      if (expiresAt) {
+        setAnnouncement(expiresAt > now ? data.message : '');
+        return;
+      }
+
+      if (createdAt) {
+        setAnnouncement(createdAt + 24 * 60 * 60 * 1000 > now ? data.message : '');
+        return;
+      }
+
+      setAnnouncement('');
     });
     return () => unsubAnnounce();
   }, []);
 
   useEffect(() => {
-    const fetchStats = async () => {
+    const fetchMetrics = async () => {
       try {
-        const q = query(collection(db, 'donations'), where('status', '==', 'completed'));
-        const snapshot = await getDocs(q);
-        const leaderboardMap: Record<string, { donations: number; karma: number }> = {};
-        const donors = new Set<string>();
-        let totalKg = 0;
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          const donorName = (data?.donorName as string | undefined)
-            || (data?.donorId as string | undefined)
-            || 'Anonymous';
-          donors.add(donorName);
-          const existing = leaderboardMap[donorName] || { donations: 0, karma: 0 };
-          leaderboardMap[donorName] = {
-            donations: existing.donations + 1,
-            karma: existing.karma + 10,
-          };
-          totalKg += parseQuantityKg(data?.quantity);
-        });
-
-        const computedLeaders = Object.entries(leaderboardMap)
-          .map(([name, stats], index) => ({
-            name,
-            donations: stats.donations,
-            karma: stats.karma,
-            badge: getFoodBadge(stats.karma),
-            message: motivationLines[index % motivationLines.length],
-          }))
-          .sort((a, b) => b.karma - a.karma)
-          .slice(0, 3);
-
-        const donationCount = snapshot.size;
-        const safeFoodKg = Math.round(totalKg * 10) / 10;
-        const estimatedMeals = safeFoodKg > 0 ? Math.round(safeFoodKg * 2.5) : donationCount * 5;
-
+        const metrics = await getLandingMetrics();
+        setImpactStats(metrics.impactStats);
+        setFoodLeaders(metrics.foodLeaders);
+        setMoneyLeaders(metrics.moneyLeaders);
+      } catch (error) {
+        console.error('Landing metrics fetch failed:', error);
         setImpactStats({
-          donations: donationCount,
-          donors: donors.size,
-          meals: estimatedMeals,
-          foodKg: safeFoodKg,
+          donations: 0,
+          donors: 0,
+          meals: 0,
+          foodKg: 0,
         });
-
-        if (computedLeaders.length) setFoodLeaders(computedLeaders);
-      } catch (e) {
-        console.error('Leaderboard Error (Check Firebase Rules):', e);
+        setFoodLeaders([]);
+        setMoneyLeaders([]);
       }
     };
 
-    const fetchMoneyLeaders = async () => {
-      try {
-        const snapshot = await getDocs(collection(db, 'moneyDonations'));
-        const totals: Record<string, { amount: number; message?: string }> = {};
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          const donorName = (data?.donorName as string | undefined)
-            || (data?.name as string | undefined)
-            || 'Anonymous';
-          const amountValue = Number(data?.amount ?? data?.value ?? data?.total ?? 0);
-          if (!Number.isFinite(amountValue)) return;
-          const existing = totals[donorName] || { amount: 0, message: undefined };
-          const donorMessage = typeof data?.message === 'string' && data.message.trim().length > 0
-            ? data.message.trim()
-            : existing.message;
-          totals[donorName] = { amount: existing.amount + amountValue, message: donorMessage };
-        });
-
-        const computedLeaders = Object.entries(totals)
-          .map(([name, data], index) => ({
-            name,
-            amount: data.amount,
-            message: data.message || motivationLines[index % motivationLines.length],
-          }))
-          .sort((a, b) => b.amount - a.amount)
-          .slice(0, 3);
-
-        if (computedLeaders.length) setMoneyLeaders(computedLeaders);
-      } catch (e) {
-        console.error('Money leaderboard fetch failed:', e);
-      }
-    };
-
-    fetchStats();
-    fetchMoneyLeaders();
+    fetchMetrics();
   }, []);
 
   const handleLogout = async () => {
@@ -369,7 +237,7 @@ const LandingPage = () => {
       await signOut(auth);
       toast.success('Logged out successfully');
       navigate('/');
-    } catch (error) {
+    } catch {
       toast.error('Error logging out');
     }
   };
@@ -379,33 +247,33 @@ const LandingPage = () => {
     if (element) element.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const statsSource = impactStats.donations > 0 ? impactStats : fallbackImpact;
-  const usingFallback = impactStats.donations === 0;
-  const dashboardPath = user ? (userRole === 'receiver' ? '/receiver' : '/donor') : '/login';
+  const dashboardPath = user ? getDashboardPath(userRole) : '/login';
+  const dashboardReady = Boolean(user && dashboardPath && !isBanned);
+  const resolvedDashboardPath = dashboardPath || '/login';
 
-  const donationCount = useCountUp(statsSource.donations);
-  const mealCount = useCountUp(statsSource.meals);
-  const donorCount = useCountUp(statsSource.donors);
+  const donationCount = useCountUp(impactStats.donations);
+  const mealCount = useCountUp(impactStats.meals);
+  const donorCount = useCountUp(impactStats.donors);
   const foodKgCount = useCountUp(
-    statsSource.foodKg,
+    impactStats.foodKg,
     1200,
-    statsSource.foodKg < 10 ? 1 : 0
+    impactStats.foodKg > 0 && impactStats.foodKg < 10 ? 1 : 0
   );
-  const displayFoodKg = statsSource.foodKg > 0
+  const displayFoodKg = impactStats.foodKg > 0
     ? foodKgCount
-    : Math.max(1, Math.round(statsSource.donations * 2.5));
+    : 0;
 
   const impactCards = useMemo(
     () => [
       {
         label: 'Donations',
-        value: `${numberFormatter.format(donationCount)}+`,
+        value: numberFormatter.format(donationCount),
         icon: Heart,
         highlight: 'Live pickups',
       },
       {
         label: 'Meals Served',
-        value: `${numberFormatter.format(mealCount)}+`,
+        value: numberFormatter.format(mealCount),
         icon: Utensils,
         highlight: 'Families fed',
       },
@@ -417,16 +285,13 @@ const LandingPage = () => {
       },
       {
         label: 'Donor Heroes',
-        value: `${numberFormatter.format(donorCount)}+`,
+        value: numberFormatter.format(donorCount),
         icon: Users,
         highlight: 'Community power',
       },
     ],
     [donationCount, mealCount, displayFoodKg, donorCount]
   );
-
-  const displayedFoodLeaders = foodLeaders.length ? foodLeaders : fallbackFoodLeaders;
-  const displayedMoneyLeaders = moneyLeaders.length ? moneyLeaders : fallbackMoneyLeaders;
 
   const handleRecipeJump = (event: React.FormEvent) => {
     event.preventDefault();
@@ -588,14 +453,25 @@ const LandingPage = () => {
             <GoogleTranslate />
             {user ? (
               <div className="flex items-center gap-3">
-                <Link to={dashboardPath}>
+                {dashboardReady ? (
+                  <Link to={resolvedDashboardPath}>
+                    <NeoButton
+                      variant="secondary"
+                      className="text-sm px-4 py-2 items-center gap-2 hidden sm:flex"
+                    >
+                      <LayoutDashboard size={16} /> Dashboard
+                    </NeoButton>
+                  </Link>
+                ) : (
                   <NeoButton
                     variant="secondary"
                     className="text-sm px-4 py-2 items-center gap-2 hidden sm:flex"
+                    disabled
                   >
-                    <LayoutDashboard size={16} /> Dashboard
+                    <LayoutDashboard size={16} />
+                    {isBanned ? 'Access blocked' : sessionLoading ? 'Checking access...' : 'Role required'}
                   </NeoButton>
-                </Link>
+                )}
                 <NeoButton
                   onClick={handleLogout}
                   variant="danger"
@@ -645,11 +521,24 @@ const LandingPage = () => {
             <span className="font-bold text-dark">Simple. Fast. Punya ka kaam.</span>
           </p>
           <div className="flex flex-col sm:flex-row gap-4 pt-3">
-            <Link to={dashboardPath}>
-              <NeoButton>
-                Donate Now <Heart className="w-5 h-5 fill-dark ml-2" />
+            {!user ? (
+              <Link to="/login">
+                <NeoButton>
+                  Donate Now <Heart className="w-5 h-5 fill-dark ml-2" />
+                </NeoButton>
+              </Link>
+            ) : dashboardReady ? (
+              <Link to={resolvedDashboardPath}>
+                <NeoButton>
+                  Donate Now <Heart className="w-5 h-5 fill-dark ml-2" />
+                </NeoButton>
+              </Link>
+            ) : (
+              <NeoButton disabled>
+                {user ? (isBanned ? 'Account blocked' : 'Checking dashboard...') : 'Login to donate'}
+                <Heart className="w-5 h-5 fill-dark ml-2" />
               </NeoButton>
-            </Link>
+            )}
             <Link to="/recipes">
               <NeoButton variant="secondary">
                 Recipes Dekho <ArrowRight className="w-5 h-5 ml-2" />
@@ -657,7 +546,7 @@ const LandingPage = () => {
             </Link>
             <NeoButton variant="secondary" onClick={handleMoneyOpen}
             >
-              Donate Money <Coins className="w-5 h-5 ml-2" />
+              Pledge Support <Coins className="w-5 h-5 ml-2" />
             </NeoButton>
           </div>
           <button
@@ -679,8 +568,10 @@ const LandingPage = () => {
               </div>
             ))}
           </div>
-          {usingFallback && (
-            <div className="text-xs font-bold text-gray-500">Showing community impact sample.</div>
+          {!impactStats.donations && (
+            <div className="text-xs font-bold text-gray-500">
+              No completed donations yet. These counters will start moving as real pickups are verified.
+            </div>
           )}
         </div>
 
@@ -710,7 +601,7 @@ const LandingPage = () => {
               <div>
                 <div className="text-xs font-bold text-gray-500 uppercase tracking-wide">Live Impact</div>
                 <div className="font-black text-xl flex items-center gap-2">
-                  {statsSource.donations > 0 ? statsSource.donations : fallbackImpact.donations}+ Donations
+                  {impactStats.donations} Donations
                   <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
                 </div>
               </div>
@@ -785,29 +676,35 @@ const LandingPage = () => {
                 </div>
               </div>
 
-              <div className="space-y-4">
-                {displayedFoodLeaders.map((hero, index) => (
-                  <div
-                    key={hero.name}
-                    className="bg-gray-50 border-2 border-dark rounded-2xl p-4 flex items-center gap-4"
-                  >
-                    <div className="flex items-center justify-center w-12 h-12 rounded-full border-2 border-dark bg-white font-black">
-                      {index === 0 ? <Crown className="text-yellow-500" /> : `#${index + 1}`}
-                    </div>
-                    <div className="flex-1">
-                      <div className="font-black text-lg">{hero.name}</div>
-                      <div className="text-xs font-bold uppercase text-gray-500">{hero.badge}</div>
-                      <div className="text-sm font-bold text-gray-600">{hero.message}</div>
-                    </div>
-                    <div className="text-right">
-                      <div className="flex items-center gap-1 font-black text-yellow-700">
-                        <Star size={16} className="fill-current" /> {hero.karma} Karma
+              {foodLeaders.length === 0 ? (
+                <div className="text-sm font-bold text-gray-500 border-2 border-dashed border-gray-300 rounded-2xl p-6 text-center">
+                  No completed donations yet. The first verified pickups will appear here.
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {foodLeaders.map((hero, index) => (
+                    <div
+                      key={hero.name}
+                      className="bg-gray-50 border-2 border-dark rounded-2xl p-4 flex items-center gap-4"
+                    >
+                      <div className="flex items-center justify-center w-12 h-12 rounded-full border-2 border-dark bg-white font-black">
+                        {index === 0 ? <Crown className="text-yellow-500" /> : `#${index + 1}`}
                       </div>
-                      <div className="text-xs font-bold text-gray-500">{hero.donations} donations</div>
+                      <div className="flex-1">
+                        <div className="font-black text-lg">{hero.name}</div>
+                        <div className="text-xs font-bold uppercase text-gray-500">{hero.badge}</div>
+                        <div className="text-sm font-bold text-gray-600">{hero.message}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="flex items-center gap-1 font-black text-yellow-700">
+                          <Star size={16} className="fill-current" /> {hero.karma} Karma
+                        </div>
+                        <div className="text-xs font-bold text-gray-500">{hero.donations} donations</div>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="bg-white border-4 border-dark rounded-3xl p-6 shadow-neo">
@@ -816,33 +713,39 @@ const LandingPage = () => {
                   <Coins size={22} />
                 </div>
                 <div>
-                  <div className="text-xs font-black uppercase text-gray-500">Top Money Donors</div>
-                  <div className="text-xl font-black">Fueling logistics and care</div>
+                  <div className="text-xs font-black uppercase text-gray-500">Top Paid Supporters</div>
+                  <div className="text-xl font-black">Confirmed support only</div>
                 </div>
               </div>
 
-              <div className="space-y-4">
-                {displayedMoneyLeaders.map((hero, index) => (
-                  <div
-                    key={hero.name}
-                    className="bg-gray-50 border-2 border-dark rounded-2xl p-4 flex items-center gap-4"
-                  >
-                    <div className="flex items-center justify-center w-12 h-12 rounded-full border-2 border-dark bg-white font-black">
-                      {index === 0 ? <Crown className="text-yellow-500" /> : `#${index + 1}`}
-                    </div>
-                    <div className="flex-1">
-                      <div className="font-black text-lg">{hero.name}</div>
-                      <div className="text-sm font-bold text-gray-600">{hero.message}</div>
-                    </div>
-                    <div className="text-right">
-                      <div className="font-black text-green-700">
-                        INR {numberFormatter.format(Math.round(hero.amount))}
+              {moneyLeaders.length === 0 ? (
+                <div className="text-sm font-bold text-gray-500 border-2 border-dashed border-gray-300 rounded-2xl p-6 text-center">
+                  No paid support recorded yet. Pledges are not shown here until payment is confirmed.
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {moneyLeaders.map((hero, index) => (
+                    <div
+                      key={hero.name}
+                      className="bg-gray-50 border-2 border-dark rounded-2xl p-4 flex items-center gap-4"
+                    >
+                      <div className="flex items-center justify-center w-12 h-12 rounded-full border-2 border-dark bg-white font-black">
+                        {index === 0 ? <Crown className="text-yellow-500" /> : `#${index + 1}`}
                       </div>
-                      <div className="text-xs font-bold text-gray-500">Donation</div>
+                      <div className="flex-1">
+                        <div className="font-black text-lg">{hero.name}</div>
+                        <div className="text-sm font-bold text-gray-600">{hero.message}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="font-black text-green-700">
+                          INR {numberFormatter.format(Math.round(hero.amount))}
+                        </div>
+                        <div className="text-xs font-bold text-gray-500">Paid support</div>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1060,7 +963,7 @@ const LandingPage = () => {
               <Mail /> missiononemeal@gmail.com
             </a>
             <div className="flex items-center justify-center gap-2 text-xl font-bold hover:text-primary transition-colors">
-              <Phone /> 9175096541 / 7030883504
+              <Phone /> 7030883504
             </div>
           </div>
           <div className="flex flex-wrap justify-center gap-4 mb-8">
@@ -1080,7 +983,7 @@ const LandingPage = () => {
             </Link>
           </div>
           <div className="border-t border-gray-700 pt-8 mt-8 text-gray-400 font-medium">
-            @Piyush Sonawane 2026 OneMeal. All rights reserved
+            @Piyush Sonawane & team 2026 OneMeal. All rights reserved
           </div>
           <div className="border-t border-gray-700 pt-8 text-gray-400 font-medium">
             Built with heart and code ❤️.
@@ -1106,7 +1009,7 @@ const LandingPage = () => {
               onClick={(event) => event.stopPropagation()}
             >
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-2xl font-black">Donate Money (Pledge)</h3>
+                <h3 className="text-2xl font-black">Pledge Support</h3>
                 <button
                   type="button"
                   onClick={() => setShowMoneyModal(false)}
@@ -1152,7 +1055,7 @@ const LandingPage = () => {
                 </NeoButton>
               </form>
               <p className="mt-3 text-xs font-bold text-gray-500">
-                Payment integration is coming soon. This saves your pledge for now.
+                Payment integration is not live yet. This records a pledge only and does not count as a paid donation.
               </p>
             </motion.div>
           </motion.div>

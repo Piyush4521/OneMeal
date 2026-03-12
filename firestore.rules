@@ -1,0 +1,171 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function userPath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userExists() {
+      return signedIn() && exists(userPath());
+    }
+
+    function userData() {
+      return get(userPath()).data;
+    }
+
+    function isActiveUser() {
+      return signedIn() && userExists() && !(userData().banned == true);
+    }
+
+    function hasRole(role) {
+      return isActiveUser() && userData().role == role;
+    }
+
+    function isAdmin() {
+      return signedIn() && request.auth.token.admin == true && (!userExists() || !(userData().banned == true));
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+
+      allow create: if isOwner(userId)
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.role in ['donor', 'receiver']
+        && request.resource.data.banned == false
+        && request.resource.data.keys().hasOnly([
+          'uid',
+          'name',
+          'email',
+          'role',
+          'banned',
+          'lastLogin',
+          'createdAt'
+        ]);
+
+      allow update: if isAdmin() || (
+        isOwner(userId)
+        && isActiveUser()
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.banned == resource.data.banned
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'name',
+          'email',
+          'lastLogin',
+          'volunteerAvailable',
+          'volunteerUpdatedAt'
+        ])
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    match /donations/{donationId} {
+      allow create: if hasRole('donor')
+        && request.resource.data.donorId == request.auth.uid
+        && request.resource.data.status == 'available'
+        && request.resource.data.keys().hasOnly([
+          'foodItem',
+          'quantity',
+          'address',
+          'location',
+          'phone',
+          'foodType',
+          'pickupPreference',
+          'donorName',
+          'donorId',
+          'status',
+          'verified',
+          'createdAt',
+          'createdAtClient'
+        ]);
+
+      allow read: if isAdmin() || (
+        isActiveUser() && (
+          resource.data.donorId == request.auth.uid
+          || resource.data.claimedById == request.auth.uid
+          || resource.data.volunteerId == request.auth.uid
+          || resource.data.status == 'available'
+        )
+      );
+
+      allow update, delete: if isAdmin();
+    }
+
+    match /donationSecrets/{donationId} {
+      allow read: if isAdmin() || (
+        isActiveUser() && resource.data.claimedById == request.auth.uid
+      );
+
+      allow write, delete: if false;
+    }
+
+    match /moneyDonations/{donationId} {
+      allow create: if isActiveUser()
+        && request.resource.data.donorId == request.auth.uid
+        && request.resource.data.status == 'pledged'
+        && request.resource.data.keys().hasOnly([
+          'amount',
+          'donorName',
+          'message',
+          'donorId',
+          'status',
+          'currency',
+          'createdAt'
+        ]);
+
+      allow read, update, delete: if isAdmin();
+    }
+
+    match /suggestions/{suggestionId} {
+      allow create: if isActiveUser()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.type == 'suggestion'
+        && request.resource.data.keys().hasOnly([
+          'message',
+          'userId',
+          'userName',
+          'createdAt',
+          'title',
+          'type'
+        ]);
+
+      allow read, update, delete: if isAdmin();
+    }
+
+    match /issues/{issueId} {
+      allow create: if isActiveUser()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.type == 'issue'
+        && request.resource.data.keys().hasOnly([
+          'title',
+          'message',
+          'reason',
+          'donationId',
+          'status',
+          'userId',
+          'userName',
+          'createdAt',
+          'type',
+          'reporterRole',
+          'source'
+        ]);
+
+      allow read, update, delete: if isAdmin();
+    }
+
+    match /system/{docId} {
+      allow read: if docId == 'global' || isAdmin();
+      allow write: if isAdmin();
+    }
+  }
+}

@@ -4,9 +4,10 @@ import { MapPin, Navigation, Clock, Phone, AlertCircle, RefreshCw, ArrowRight, M
 import { Link, useNavigate } from 'react-router-dom';
 import { NeoButton } from '../components/ui/NeoButton';
 import { db, auth } from '../firebase';
-import { collection, query, where, onSnapshot, doc, updateDoc } from 'firebase/firestore';
+import { collection, onSnapshot, query, where } from 'firebase/firestore';
 import toast from 'react-hot-toast';
 import { generateText, isGeminiConfigured } from '../lib/aiClient';
+import { claimDonation, reportDonation } from '../lib/backendClient';
 import { openChat } from '../lib/chatEvents';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -14,7 +15,7 @@ import L from 'leaflet';
 import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 
-let DefaultIcon = L.icon({
+const DefaultIcon = L.icon({
     iconUrl: icon,
     shadowUrl: iconShadow,
     iconSize: [25, 41],
@@ -86,6 +87,7 @@ const ReceiverDashboard = () => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [donations, setDonations] = useState<any[]>([]);
   const [myClaims, setMyClaims] = useState<any[]>([]);
+  const [pickupOtps, setPickupOtps] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [ngoLocation, setNgoLocation] = useState<{lat: number, lng: number} | null>(null);
   const [selectedDonation, setSelectedDonation] = useState<string | null>(null);
@@ -112,7 +114,7 @@ const ReceiverDashboard = () => {
   }, []);
 
   useEffect(() => {
-    const q = query(collection(db, "donations"), where("status", "in", ["available", "on_way"]));
+    const q = query(collection(db, 'donations'), where('status', '==', 'available'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const foodData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
       setDonations(foodData);
@@ -122,14 +124,37 @@ const ReceiverDashboard = () => {
   }, []);
 
   useEffect(() => {
-      if(!auth.currentUser) return;
-      
-      const q = query(collection(db, "donations"), where("status", "in", ["claimed", "completed"]));
+      if(!auth.currentUser) {
+          setMyClaims([]);
+          return;
+      }
+
+      const q = query(collection(db, 'donations'), where('claimedById', '==', auth.currentUser.uid));
       const unsubscribe = onSnapshot(q, (snapshot) => {
-          const allClaims = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-          const myData = allClaims.filter((d:any) => d.claimedById === auth.currentUser?.uid || d.claimedBy === auth.currentUser?.displayName || d.claimedBy === "NGO"); 
+          const myData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
           setMyClaims(myData);
       });
+      return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+      if (!auth.currentUser) {
+          setPickupOtps({});
+          return;
+      }
+
+      const q = query(collection(db, 'donationSecrets'), where('claimedById', '==', auth.currentUser.uid));
+      const unsubscribe = onSnapshot(q, (snapshot) => {
+          const next = snapshot.docs.reduce<Record<string, string>>((accumulator, docSnapshot) => {
+              const data = docSnapshot.data();
+              if (typeof data?.otp === 'string') {
+                  accumulator[docSnapshot.id] = data.otp;
+              }
+              return accumulator;
+          }, {});
+          setPickupOtps(next);
+      });
+
       return () => unsubscribe();
   }, []);
 
@@ -160,7 +185,7 @@ const ReceiverDashboard = () => {
 
   const handleAiPickups = async () => {
     if (!hasAi) {
-      toast.error('AI tips need VITE_GEMINI_API_KEY.');
+      toast.error('AI assistant is not available right now.');
       return;
     }
     if (sortedDonations.length === 0) {
@@ -285,7 +310,7 @@ const ReceiverDashboard = () => {
 
                             {!hasAi && (
                                 <p className="mt-2 text-[10px] font-bold text-red-600">
-                                    Add <span className="font-black">VITE_GEMINI_API_KEY</span> in <code>.env</code> to enable.
+                                    AI suggestions are temporarily unavailable.
                                 </p>
                             )}
                             {aiPickupsError && (
@@ -387,7 +412,7 @@ const ReceiverDashboard = () => {
                             {activePickups.map((item) => (
                                 <div key={item.id} className="bg-yellow-50 border-4 border-yellow-400 p-6 rounded-2xl shadow-neo relative">
                                     <div className="absolute -top-3 -right-3 bg-red-500 text-white font-black px-3 py-1 rounded-full border-2 border-black animate-pulse">
-                                        OTP: {item.otp}
+                                        OTP: {pickupOtps[item.id] || 'Pending'}
                                     </div>
                                     <div className="flex items-center gap-2 mb-1">
                                         <h3 className="font-black text-xl">{item.foodItem}</h3>
@@ -483,36 +508,29 @@ const FoodCard = ({ data, ngoLocation, isSelected, onFocus }: any) => {
       toast.error('Pickup already in progress.');
       return;
     }
+    if (!auth.currentUser) {
+      toast.error('Please sign in again.');
+      return;
+    }
     try {
         setClaimed(true);
-        const otpCode = Math.floor(1000 + Math.random() * 9000).toString();
-        const foodRef = doc(db, "donations", data.id);
-        await updateDoc(foodRef, {
-            status: "claimed",
-            claimedBy: auth.currentUser?.displayName || "NGO",
-            claimedById: auth.currentUser?.uid || null,
-            claimedAt: new Date(),
-            otp: otpCode 
-        });
-        toast.success(`Claimed! check 'My Pickups'`, { duration: 4000, icon: '!' });
+        const result = await claimDonation(data.id);
+        toast.success(`Claimed. OTP ${result.otp} is now in My Pickups.`, { duration: 4000 });
     } catch (error) {
         console.error("Error claiming:", error);
         setClaimed(false);
+        toast.error('Pickup could not be claimed.');
     }
   };
 
   const handleReport = async () => {
-      if(!window.confirm("Are you sure? This will deduct Karma from the Donor.")) return;
+      const reason = window.prompt('Why are you reporting this donation?')?.trim();
+      if(!reason) return;
       try {
           setReporting(true);
-          const foodRef = doc(db, "donations", data.id);
-          await updateDoc(foodRef, {
-              status: "reported", 
-              reportedAt: new Date(),
-              reportedBy: auth.currentUser?.uid
-          });
+          await reportDonation(data.id, reason);
           toast.error("Donation reported.");
-      } catch (e) {
+      } catch {
           toast.error("Error reporting.");
       } finally {
           setReporting(false);
@@ -532,6 +550,12 @@ const FoodCard = ({ data, ngoLocation, isSelected, onFocus }: any) => {
     <motion.div 
         ref={cardRef}
         onClick={onFocus}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            onFocus();
+          }
+        }}
         layout
         initial={{ scale: 0.9, opacity: 0 }}
         whileHover={{ y: -4 }}

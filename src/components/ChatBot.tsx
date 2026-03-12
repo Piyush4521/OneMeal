@@ -117,12 +117,12 @@ export const ChatBot = () => {
       setConnectionState('connecting');
 
       try {
-        const modelName = await getGeminiTextModel(controller.signal);
+        const modelName = await getGeminiTextModel();
         if (isActive) {
           setActiveModel(modelName);
           setConnectionState('ready');
         }
-      } catch (error) {
+      } catch {
         if (isActive) {
           console.error('Model check failed.');
           setConnectionState('error');
@@ -199,7 +199,7 @@ export const ChatBot = () => {
     if (!trimmed || isTyping) return;
 
     if (!hasApiKey) {
-      setErrorBanner('API key missing. Add VITE_GEMINI_API_KEY in .env to enable chat.');
+      setErrorBanner('AI chat is temporarily unavailable.');
       return;
     }
 
@@ -427,7 +427,7 @@ export const ChatBot = () => {
 
                 {!hasApiKey && (
                   <div className="bg-red-100 border-2 border-dark p-3 rounded-xl text-xs font-bold">
-                    API key missing. Add <code>VITE_GEMINI_API_KEY</code> in <code>.env</code> to enable chat.
+                    AI chat is temporarily unavailable.
                   </div>
                 )}
 

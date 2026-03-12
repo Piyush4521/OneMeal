@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { db, auth } from '../firebase';
-import { collection, onSnapshot, doc, updateDoc, setDoc, query, orderBy, deleteDoc } from 'firebase/firestore';
+import { collection, deleteDoc, deleteField, doc, onSnapshot, orderBy, query, serverTimestamp, setDoc, Timestamp, updateDoc } from 'firebase/firestore';
 import { Users, Megaphone, Ban, CheckCircle, Coins, LogOut, Package, MapPin, Activity, AlertTriangle, ShieldAlert, MessageSquare, Trash2, Search, Download, Filter, RefreshCcw, Clock, TrendingUp, Layers, Eye, EyeOff, UserCheck, UserX, ShieldCheck } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { NeoButton } from '../components/ui/NeoButton';
@@ -14,6 +14,24 @@ const ANNOUNCEMENT_TEMPLATES = [
   { label: 'Pickup Delay', message: 'Notice: Pickup delays due to road closures. Please coordinate drop-offs at alternate routes.' },
   { label: 'Safety Notice', message: 'Safety reminder: Label items clearly and ensure packages are sealed for safe distribution.' },
 ];
+
+const toDateSafe = (timestamp: any) => {
+    if(!timestamp) return null;
+    if(timestamp instanceof Date) return timestamp;
+    if(typeof timestamp === 'number') return new Date(timestamp);
+    if(typeof timestamp === 'string') {
+        const parsed = new Date(timestamp);
+        return isNaN(parsed.getTime()) ? null : parsed;
+    }
+    if(timestamp.toDate) return timestamp.toDate();
+    if(typeof timestamp.seconds === 'number') return new Date(timestamp.seconds * 1000);
+    return null;
+};
+
+const getTimeValue = (timestamp: any) => {
+    const date = toDateSafe(timestamp);
+    return date ? date.getTime() : 0;
+};
 
 type ActivityItem =
   | {
@@ -53,6 +71,7 @@ const AdminDashboard = () => {
   const [donations, setDonations] = useState<any[]>([]);
   const [moneyDonations, setMoneyDonations] = useState<any[]>([]);
   const [suggestions, setSuggestions] = useState<any[]>([]);
+  const [issues, setIssues] = useState<any[]>([]);
   const [announcement, setAnnouncement] = useState('');
   const [loading, setLoading] = useState(true);
   const [userQuery, setUserQuery] = useState('');
@@ -74,6 +93,7 @@ const AdminDashboard = () => {
   const [lastDonationsSync, setLastDonationsSync] = useState<Date | null>(null);
   const [lastMoneySync, setLastMoneySync] = useState<Date | null>(null);
   const [lastSuggestionsSync, setLastSuggestionsSync] = useState<Date | null>(null);
+  const [lastIssuesSync, setLastIssuesSync] = useState<Date | null>(null);
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
   const [refreshTick, setRefreshTick] = useState(0);
   const [aiSummary, setAiSummary] = useState<string[]>([]);
@@ -102,7 +122,7 @@ const AdminDashboard = () => {
       try {
         const parsed = JSON.parse(historyRaw);
         if (Array.isArray(parsed)) setAnnouncementHistory(parsed);
-      } catch (e) {
+      } catch {
         console.warn('Invalid announcement history cache');
       }
     }
@@ -145,34 +165,24 @@ const AdminDashboard = () => {
         console.error("Suggestion fetch error:", error);
         toast.error("Suggestion sync failed");
     });
+    const qIssues = query(collection(db, 'issues'), orderBy('createdAt', 'desc'));
+    const unsubIssues = onSnapshot(qIssues, (snap) => {
+        setIssues(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        setLastIssuesSync(new Date());
+    }, (error) => {
+        console.error('Issue fetch error:', error);
+        toast.error('Issue sync failed');
+    });
 
-    return () => { unsubUsers(); unsubDonations(); unsubMoney(); unsubSuggestions(); };
+    return () => { unsubUsers(); unsubDonations(); unsubMoney(); unsubSuggestions(); unsubIssues(); };
   }, [navigate, refreshTick]);
-
-  const toDateSafe = (timestamp: any) => {
-      if(!timestamp) return null;
-      if(timestamp instanceof Date) return timestamp;
-      if(typeof timestamp === 'number') return new Date(timestamp);
-      if(typeof timestamp === 'string') {
-          const parsed = new Date(timestamp);
-          return isNaN(parsed.getTime()) ? null : parsed;
-      }
-      if(timestamp.toDate) return timestamp.toDate();
-      if(typeof timestamp.seconds === 'number') return new Date(timestamp.seconds * 1000);
-      return null;
-  };
-
-  const getTimeValue = (timestamp: any) => {
-      const date = toDateSafe(timestamp);
-      return date ? date.getTime() : 0;
-  };
 
   const toggleBan = async (userId: string, currentStatus: boolean) => {
       if(!window.confirm(`Are you sure you want to ${currentStatus ? 'Unban' : 'BAN'} this user?`)) return;
       try {
           await updateDoc(doc(db, "users", userId), { banned: !currentStatus });
           toast.success(currentStatus ? "User Unbanned ?" : "User Banned ??");
-      } catch(e) { toast.error("Error updating user"); }
+      } catch { toast.error("Error updating user"); }
   };
 
   const postAnnouncement = async () => {
@@ -183,8 +193,8 @@ const AdminDashboard = () => {
           await setDoc(doc(db, "system", "global"), { 
               message,
               active: true,
-              createdAt: new Date(),
-              expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
+              createdAt: serverTimestamp(),
+              expiresAt: Timestamp.fromMillis(Date.now() + 24 * 60 * 60 * 1000)
           });
           const now = new Date();
           setLastAnnouncementAt(now);
@@ -196,7 +206,7 @@ const AdminDashboard = () => {
           });
           toast.success("Announcement Live! ??");
           setAnnouncement("");
-      } catch(e) { toast.error("Failed to post"); }
+      } catch { toast.error("Failed to post"); }
       finally { setAnnounceSaving(false); }
   };
 
@@ -205,7 +215,39 @@ const AdminDashboard = () => {
       try {
           await deleteDoc(doc(db, "suggestions", id));
           toast.success("Suggestion deleted");
-      } catch(e) { toast.error("Error deleting"); }
+      } catch { toast.error("Error deleting"); }
+  };
+
+  const resolveIssue = async (issueId: string) => {
+      const resolutionInput = window.prompt('Add an optional resolution note before closing this issue.', '');
+      if (resolutionInput === null) return;
+      const resolutionNote = resolutionInput.trim();
+      try {
+          await updateDoc(doc(db, 'issues', issueId), {
+              resolutionStatus: 'resolved',
+              resolvedAt: serverTimestamp(),
+              resolvedBy: auth.currentUser?.uid || 'admin',
+              resolutionNote: resolutionNote ? resolutionNote : deleteField(),
+          });
+          toast.success('Issue resolved');
+      } catch {
+          toast.error('Failed to resolve issue');
+      }
+  };
+
+  const reopenIssue = async (issueId: string) => {
+      if (!window.confirm('Reopen this issue?')) return;
+      try {
+          await updateDoc(doc(db, 'issues', issueId), {
+              resolutionStatus: deleteField(),
+              resolvedAt: deleteField(),
+              resolvedBy: deleteField(),
+              resolutionNote: deleteField(),
+          });
+          toast.success('Issue reopened');
+      } catch {
+          toast.error('Failed to reopen issue');
+      }
   };
 
   const reopenReportedDonation = async (donationId: string) => {
@@ -213,11 +255,11 @@ const AdminDashboard = () => {
       try {
           await updateDoc(doc(db, "donations", donationId), {
               status: "available",
-              reportedResolvedAt: new Date(),
+              reportedResolvedAt: serverTimestamp(),
               reportedResolvedBy: auth.currentUser?.uid || "admin"
           });
           toast.success("Donation reopened");
-      } catch(e) { toast.error("Failed to reopen"); }
+      } catch { toast.error("Failed to reopen"); }
   };
 
   const removeReportedDonation = async (donationId: string) => {
@@ -225,7 +267,7 @@ const AdminDashboard = () => {
       try {
           await deleteDoc(doc(db, "donations", donationId));
           toast.success("Donation removed");
-      } catch(e) { toast.error("Failed to remove"); }
+      } catch { toast.error("Failed to remove"); }
   };
 
   const formatTime = (timestamp: any) => {
@@ -248,7 +290,7 @@ const AdminDashboard = () => {
   const formatMoneyAmount = (amount: number, currency = 'INR') => {
       try {
           return new Intl.NumberFormat('en-IN', { style: 'currency', currency, maximumFractionDigits: 0 }).format(amount);
-      } catch (e) {
+      } catch {
           return `${currency} ${Math.round(amount)}`;
       }
   };
@@ -440,6 +482,20 @@ const AdminDashboard = () => {
       return donations.filter((d) => (d.status || '').toLowerCase() === 'reported');
   }, [donations]);
 
+  const submittedIssues = useMemo(() => {
+      return issues
+          .filter((issue) => (!issue.type || issue.type === 'issue') && issue.resolutionStatus !== 'resolved')
+          .sort((a, b) => getTimeValue(b.createdAt) - getTimeValue(a.createdAt));
+  }, [issues]);
+
+  const resolvedIssues = useMemo(() => {
+      return issues
+          .filter((issue) => (!issue.type || issue.type === 'issue') && issue.resolutionStatus === 'resolved')
+          .sort((a, b) => getTimeValue(b.createdAt) - getTimeValue(a.createdAt));
+  }, [issues]);
+
+  const openIssueCount = reportedDonations.length + submittedIssues.length;
+
   const suggestionStats = useMemo(() => {
       const cutoff = Date.now() - 24 * 60 * 60 * 1000;
       let recent = 0;
@@ -462,7 +518,7 @@ const AdminDashboard = () => {
 
   const handleAiSummary = async () => {
       if (!hasAi) {
-          toast.error('AI summary needs VITE_GEMINI_API_KEY.');
+          toast.error('AI assistant is not available right now.');
           return;
       }
       if (!filteredSuggestions.length) {
@@ -503,12 +559,12 @@ const AdminDashboard = () => {
 
   const handleAiIssues = async () => {
       if (!hasAi) {
-          toast.error('AI insights need VITE_GEMINI_API_KEY.');
+          toast.error('AI assistant is not available right now.');
           return;
       }
-      if (!reportedDonations.length) {
+      if (!reportedDonations.length && !submittedIssues.length) {
           setAiIssueSummary([]);
-          setAiIssueError('No reported donations to analyze.');
+          setAiIssueError('No issues to analyze.');
           return;
       }
 
@@ -516,13 +572,18 @@ const AdminDashboard = () => {
       setAiIssueError(null);
       setAiIssueSummary([]);
       try {
-          const sample = reportedDonations.slice(0, 6).map((d, idx) => {
-              return `#${idx + 1} ${d.foodItem || 'Donation'} | ${d.quantity || 'qty?'} | ${d.donorName || 'donor?'} | ${d.address || 'location?'}`;
-          }).join('\n');
+          const donationSample = reportedDonations.slice(0, 4).map((d, idx) => {
+              const reporter = d.reportMeta?.reporterName || d.reportedBy || 'unknown reporter';
+              return `Donation #${idx + 1}: ${d.foodItem || 'Donation'} | ${d.quantity || 'qty?'} | ${d.address || 'location?'} | reason: ${d.reportReason || 'no reason'} | reporter: ${reporter}`;
+          });
+          const issueSample = submittedIssues.slice(0, 4).map((issue, idx) => {
+              return `Issue #${idx + 1}: ${issue.title || 'Issue'} | reason: ${issue.reason || issue.message || 'no details'} | source: ${issue.source || 'unknown'} | reporter: ${issue.userName || 'anonymous'}`;
+          });
+          const sample = [...donationSample, ...issueSample].join('\n');
 
           const prompt = [
               'You are an admin assistant.',
-              'Identify patterns or risks from reported donations.',
+              'Identify patterns or risks from these reported donations and submitted issues.',
               'Return 3 short bullets, each starting with "- ".',
               sample
           ].join('\n');
@@ -841,8 +902,8 @@ const AdminDashboard = () => {
                 </button>
                 <button onClick={() => setActiveTab('issues')} className={`w-full p-4 border-2 border-dark rounded-xl font-bold flex items-center gap-3 transition-all hover:translate-x-1 ${activeTab === 'issues' ? 'bg-red-300 shadow-neo translate-x-1' : 'bg-white'}`}>
                     <ShieldCheck size={20}/> Issues
-                    {reportedDonations.length > 0 && (
-                        <span className="ml-auto bg-red-500 text-white text-xs px-2 py-0.5 rounded-full">{reportedDonations.length}</span>
+                    {openIssueCount > 0 && (
+                        <span className="ml-auto bg-red-500 text-white text-xs px-2 py-0.5 rounded-full">{openIssueCount}</span>
                     )}
                 </button>
                 <button onClick={() => setActiveTab('suggestions')} className={`w-full p-4 border-2 border-dark rounded-xl font-bold flex items-center gap-3 transition-all hover:translate-x-1 ${activeTab === 'suggestions' ? 'bg-purple-400 shadow-neo translate-x-1' : 'bg-white'}`}>
@@ -1195,14 +1256,24 @@ const AdminDashboard = () => {
                 {activeTab === 'issues' && (
                     <div className="animate-fadeIn">
                         <div className="flex justify-between items-center mb-6 border-b-2 border-gray-100 pb-4">
-                            <h2 className="text-2xl font-black flex items-center gap-2"><ShieldCheck/> Reported Donations</h2>
-                            <span className="bg-red-100 px-3 py-1 rounded-lg border-2 border-red-300 font-bold text-xs text-red-700">{reportedDonations.length} Issues</span>
+                            <div>
+                                <h2 className="text-2xl font-black flex items-center gap-2"><ShieldCheck/> Issues & Reports</h2>
+                                {lastIssuesSync && (
+                                    <div className="text-xs font-bold text-gray-500 mt-1">Last sync: {formatTime(lastIssuesSync)}</div>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <span className="bg-red-100 px-3 py-1 rounded-lg border-2 border-red-300 font-bold text-xs text-red-700">{openIssueCount} Open Items</span>
+                                {resolvedIssues.length > 0 && (
+                                    <span className="bg-emerald-100 px-3 py-1 rounded-lg border-2 border-emerald-300 font-bold text-xs text-emerald-700">{resolvedIssues.length} Resolved</span>
+                                )}
+                            </div>
                         </div>
                         <div className="bg-red-50 border-2 border-red-200 rounded-xl p-4 mb-4">
                             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
                                 <div>
                                     <p className="text-xs font-black uppercase text-red-700">AI Risk Insights</p>
-                                    <p className="text-xs font-bold text-gray-600">Spot patterns in reported donations.</p>
+                                    <p className="text-xs font-bold text-gray-600">Spot patterns across reported donations and submitted issues.</p>
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <button
@@ -1222,7 +1293,7 @@ const AdminDashboard = () => {
                             </div>
                             {!hasAi && (
                                 <p className="mt-2 text-[10px] font-bold text-red-600">
-                                    Add <span className="font-black">VITE_GEMINI_API_KEY</span> in <code>.env</code> to enable.
+                                    AI insights are temporarily unavailable.
                                 </p>
                             )}
                             {aiIssueError && (
@@ -1240,48 +1311,156 @@ const AdminDashboard = () => {
                             )}
                         </div>
 
-                        {reportedDonations.length === 0 ? (
+                        {reportedDonations.length === 0 && submittedIssues.length === 0 ? (
                             <div className="text-center py-12 text-gray-500 font-bold border-2 border-dashed border-gray-300 rounded-xl">
-                                No reported donations right now.
+                                No open issues right now.
                             </div>
                         ) : (
-                            <div className="space-y-4">
-                                {reportedDonations.map((d) => (
-                                    <div key={d.id} className="bg-red-50 border-2 border-red-200 rounded-xl p-4">
-                                        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
-                                            <div>
-                                                <div className="flex items-center gap-2 mb-1">
-                                                    <h3 className="font-black text-lg">{d.foodItem || 'Donation'}</h3>
-                                                    <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${d.pickupPreference === 'flexible' ? 'bg-purple-100 text-purple-700 border-purple-200' : 'bg-blue-100 text-blue-700 border-blue-200'}`}>
-                                                        {d.pickupPreference === 'flexible' ? 'FLEXIBLE' : 'ASAP'}
-                                                    </span>
-                                                    {d.verified && <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded border border-blue-200">AI OK</span>}
+                            <div className="space-y-8">
+                                <div>
+                                    <div className="flex items-center justify-between mb-3">
+                                        <h3 className="text-lg font-black">Reported donations</h3>
+                                        <span className="text-xs font-bold text-gray-500">{reportedDonations.length} items</span>
+                                    </div>
+                                    {reportedDonations.length === 0 ? (
+                                        <div className="text-center py-8 text-gray-500 font-bold border-2 border-dashed border-gray-300 rounded-xl">
+                                            No reported donations right now.
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-4">
+                                            {reportedDonations.map((d) => (
+                                                <div key={d.id} className="bg-red-50 border-2 border-red-200 rounded-xl p-4">
+                                                    <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+                                                        <div>
+                                                            <div className="flex items-center gap-2 mb-1">
+                                                                <h3 className="font-black text-lg">{d.foodItem || 'Donation'}</h3>
+                                                                <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${d.pickupPreference === 'flexible' ? 'bg-purple-100 text-purple-700 border-purple-200' : 'bg-blue-100 text-blue-700 border-blue-200'}`}>
+                                                                    {d.pickupPreference === 'flexible' ? 'FLEXIBLE' : 'ASAP'}
+                                                                </span>
+                                                                {d.verified && <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded border border-blue-200">AI OK</span>}
+                                                            </div>
+                                                            <div className="text-xs font-bold text-gray-600">{d.quantity || 'Quantity'} - {d.donorName || 'Anonymous'}</div>
+                                                            <div className="text-xs font-mono text-gray-500 mt-1">{d.phone || 'No phone'}</div>
+                                                            <div className="text-xs font-bold text-gray-500 mt-1">Created: {formatDonationTime(d)}</div>
+                                                            <div className="text-xs font-bold text-gray-600 mt-2 flex items-start gap-1">
+                                                                <MapPin size={12} className="mt-0.5 text-primary" />
+                                                                <span>{d.address || 'GPS Location'}</span>
+                                                            </div>
+                                                            <div className="mt-3 text-xs font-bold text-red-700">
+                                                                Reason: {d.reportReason || 'No reason submitted'}
+                                                            </div>
+                                                            <div className="text-xs font-bold text-gray-500 mt-1">
+                                                                Reporter: {d.reportMeta?.reporterName || d.reportedBy || 'Unknown'} ({d.reportMeta?.reporterRole || 'unknown'})
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex flex-wrap gap-2">
+                                                            <button
+                                                                onClick={() => reopenReportedDonation(d.id)}
+                                                                className="text-xs font-bold px-3 py-2 rounded-lg border-2 border-dark bg-white hover:bg-gray-100"
+                                                            >
+                                                                Reopen
+                                                            </button>
+                                                            <button
+                                                                onClick={() => removeReportedDonation(d.id)}
+                                                                className="text-xs font-bold px-3 py-2 rounded-lg border-2 border-red-400 bg-red-100 text-red-700 hover:bg-red-200"
+                                                            >
+                                                                Remove
+                                                            </button>
+                                                        </div>
+                                                    </div>
                                                 </div>
-                                                <div className="text-xs font-bold text-gray-600">{d.quantity || 'Quantity'} - {d.donorName || 'Anonymous'}</div>
-                                                <div className="text-xs font-mono text-gray-500 mt-1">{d.phone || 'No phone'}</div>
-                                                <div className="text-xs font-bold text-gray-500 mt-1">Created: {formatDonationTime(d)}</div>
-                                                <div className="text-xs font-bold text-gray-600 mt-2 flex items-start gap-1">
-                                                    <MapPin size={12} className="mt-0.5 text-primary" />
-                                                    <span>{d.address || 'GPS Location'}</span>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div>
+                                    <div className="flex items-center justify-between mb-3">
+                                        <h3 className="text-lg font-black">Submitted issues</h3>
+                                        <span className="text-xs font-bold text-gray-500">{submittedIssues.length} items</span>
+                                    </div>
+                                    {submittedIssues.length === 0 ? (
+                                        <div className="text-center py-8 text-gray-500 font-bold border-2 border-dashed border-gray-300 rounded-xl">
+                                            No submitted issues right now.
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-4">
+                                            {submittedIssues.map((issue) => (
+                                                <div key={issue.id} className="bg-amber-50 border-2 border-amber-200 rounded-xl p-4">
+                                                    <div className="flex items-start justify-between gap-3">
+                                                        <div>
+                                                            <div className="font-black text-lg">{issue.title || 'Issue'}</div>
+                                                            <div className="text-xs font-bold text-gray-500 mt-1">
+                                                                {issue.userName || 'Anonymous'} • {issue.reporterRole || 'unknown'} • {formatTime(issue.createdAt)}
+                                                            </div>
+                                                            <div className="mt-3 text-sm font-bold text-gray-700">
+                                                                {issue.reason || issue.message || 'No details provided.'}
+                                                            </div>
+                                                            {issue.donationId && (
+                                                                <div className="mt-2 text-xs font-mono text-gray-500">
+                                                                    Donation ID: {issue.donationId}
+                                                                </div>
+                                                            )}
+                                                            <div className="mt-2 text-xs font-bold text-gray-500">
+                                                                Source: {issue.source || 'unknown'}
+                                                            </div>
+                                                            {issue.status && (
+                                                                <div className="mt-2 text-xs font-bold text-gray-500">
+                                                                    Related donation status: {issue.status}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        <div className="flex flex-wrap gap-2">
+                                                            <button
+                                                                onClick={() => resolveIssue(issue.id)}
+                                                                className="text-xs font-bold px-3 py-2 rounded-lg border-2 border-dark bg-white hover:bg-gray-100"
+                                                            >
+                                                                Resolve
+                                                            </button>
+                                                        </div>
+                                                    </div>
                                                 </div>
-                                            </div>
-                                            <div className="flex flex-wrap gap-2">
-                                                <button
-                                                    onClick={() => reopenReportedDonation(d.id)}
-                                                    className="text-xs font-bold px-3 py-2 rounded-lg border-2 border-dark bg-white hover:bg-gray-100"
-                                                >
-                                                    Reopen
-                                                </button>
-                                                <button
-                                                    onClick={() => removeReportedDonation(d.id)}
-                                                    className="text-xs font-bold px-3 py-2 rounded-lg border-2 border-red-400 bg-red-100 text-red-700 hover:bg-red-200"
-                                                >
-                                                    Remove
-                                                </button>
-                                            </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+
+                                {resolvedIssues.length > 0 && (
+                                    <div>
+                                        <div className="flex items-center justify-between mb-3">
+                                            <h3 className="text-lg font-black">Recently resolved issues</h3>
+                                            <span className="text-xs font-bold text-gray-500">{resolvedIssues.length} items</span>
+                                        </div>
+                                        <div className="space-y-4">
+                                            {resolvedIssues.slice(0, 6).map((issue) => (
+                                                <div key={issue.id} className="bg-emerald-50 border-2 border-emerald-200 rounded-xl p-4">
+                                                    <div className="flex items-start justify-between gap-3">
+                                                        <div>
+                                                            <div className="font-black text-lg">{issue.title || 'Issue'}</div>
+                                                            <div className="text-xs font-bold text-gray-500 mt-1">
+                                                                Resolved {formatTime(issue.resolvedAt)} by {issue.resolvedBy || 'admin'}
+                                                            </div>
+                                                            <div className="mt-3 text-sm font-bold text-gray-700">
+                                                                {issue.reason || issue.message || 'No details provided.'}
+                                                            </div>
+                                                            {issue.resolutionNote && (
+                                                                <div className="mt-2 text-xs font-bold text-emerald-700">
+                                                                    Resolution note: {issue.resolutionNote}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                        <button
+                                                            onClick={() => reopenIssue(issue.id)}
+                                                            className="text-xs font-bold px-3 py-2 rounded-lg border-2 border-dark bg-white hover:bg-gray-100"
+                                                        >
+                                                            Reopen
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ))}
                                         </div>
                                     </div>
-                                ))}
+                                )}
                             </div>
                         )}
                     </div>
@@ -1316,7 +1495,7 @@ const AdminDashboard = () => {
                             </div>
                             {!hasAi && (
                                 <p className="mt-2 text-[10px] font-bold text-red-600">
-                                    Add <span className="font-black">VITE_GEMINI_API_KEY</span> in <code>.env</code> to enable.
+                                    AI summary is temporarily unavailable.
                                 </p>
                             )}
                             {aiSummaryError && (

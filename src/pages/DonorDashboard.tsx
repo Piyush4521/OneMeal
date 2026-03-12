@@ -3,12 +3,18 @@ import { motion } from 'framer-motion';
 import { Send, MapPin, Package, Phone, Award, LocateFixed, CheckCircle, LockKeyhole, AlertCircle, Camera, Sparkles, XCircle, Leaf, Beef, Menu, History, Gift, MessageSquare, Info, Search, ArrowUpDown, Filter, Repeat, RefreshCw, Compass, Navigation, ShieldCheck, UserCheck } from 'lucide-react';
 import { NeoButton } from '../components/ui/NeoButton';
 import { db, auth } from '../firebase';
-import { collection, addDoc, serverTimestamp, query, where, doc, updateDoc, onSnapshot, setDoc } from 'firebase/firestore';
+import { addDoc, collection, doc, onSnapshot, query, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import type { Timestamp } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { generateText, isGeminiConfigured, verifyFoodImage } from '../lib/aiClient';
+import {
+  acceptVolunteerPickup,
+  completeVolunteerPickup,
+  releaseVolunteerPickup,
+  verifyDonationOtp,
+} from '../lib/backendClient';
 import { openChat } from '../lib/chatEvents';
 import GoogleTranslate from '../components/GoogleTranslate';
 import { MapContainer, TileLayer, Marker, Popup, useMapEvents, useMap } from 'react-leaflet';
@@ -17,7 +23,7 @@ import L from 'leaflet';
 import icon from 'leaflet/dist/images/marker-icon.png';
 import iconShadow from 'leaflet/dist/images/marker-shadow.png';
 
-let DefaultIcon = L.icon({
+const DefaultIcon = L.icon({
   iconUrl: icon,
   shadowUrl: iconShadow,
   iconSize: [25, 41],
@@ -452,7 +458,7 @@ const DonorDashboard = () => {
 
   const handleAiTips = async () => {
     if (!hasAi) {
-      toast.error('AI tips need VITE_GEMINI_API_KEY.');
+      toast.error('AI assistant is not available right now.');
       return;
     }
     if (!trimmedFoodItem && !trimmedQuantity && !trimmedAddress) {
@@ -593,28 +599,34 @@ const DonorDashboard = () => {
         userName: auth.currentUser?.displayName || 'Anonymous',
         createdAt: serverTimestamp(),
         title: 'Donor Suggestion',
+        type: 'suggestion',
       });
       toast.success('Thanks! Your suggestion was sent to Admin.');
       setSuggestionText('');
-    } catch (e) {
+    } catch {
       toast.error('Failed to send');
     }
   };
 
   const reportDonationIssue = async (item: Donation) => {
-    if (!window.confirm('Report an issue with this donation? Admin will review.')) return;
+    const reason = window.prompt('Tell admin what went wrong with this donation.')?.trim();
+    if (!reason) return;
     try {
-      await addDoc(collection(db, 'suggestions'), {
-        title: 'Donation Issue',
+      await addDoc(collection(db, 'issues'), {
+        title: 'Donor Issue',
         message: `Issue reported for donation: ${item.foodItem || 'Food'} (${item.quantity || 'Quantity'}) at ${item.address || 'Address'}. Status: ${item.status || 'unknown'}.`,
+        reason,
         donationId: item.id,
+        status: item.status || 'unknown',
         userId: auth.currentUser?.uid,
         userName: auth.currentUser?.displayName || 'Anonymous',
         createdAt: serverTimestamp(),
-        issueType: 'donation',
+        reporterRole: 'donor',
+        source: 'donor-dashboard',
+        type: 'issue',
       });
       toast.success('Issue reported to Admin.');
-    } catch (e) {
+    } catch {
       toast.error('Failed to report issue.');
     }
   };
@@ -649,7 +661,7 @@ const DonorDashboard = () => {
         { merge: true }
       );
       toast.success(next ? 'Volunteer mode enabled.' : 'Volunteer mode paused.');
-    } catch (error) {
+    } catch {
       setVolunteerAvailability(!next);
       toast.error('Failed to update volunteer status.');
     }
@@ -666,15 +678,9 @@ const DonorDashboard = () => {
     }
     setVolunteerActionId(item.id);
     try {
-      await updateDoc(doc(db, 'donations', item.id), {
-        status: 'on_way',
-        volunteerId: auth.currentUser.uid,
-        volunteerName: auth.currentUser.displayName || 'Volunteer',
-        volunteerStatus: 'accepted',
-        volunteerAcceptedAt: serverTimestamp(),
-      });
+      await acceptVolunteerPickup(item.id);
       toast.success('Pickup accepted.');
-    } catch (error) {
+    } catch {
       toast.error('Failed to accept pickup.');
     } finally {
       setVolunteerActionId(null);
@@ -685,13 +691,9 @@ const DonorDashboard = () => {
     if (!auth.currentUser) return;
     setVolunteerActionId(item.id);
     try {
-      await updateDoc(doc(db, 'donations', item.id), {
-        status: 'completed',
-        volunteerStatus: 'completed',
-        volunteerCompletedAt: serverTimestamp(),
-      });
+      await completeVolunteerPickup(item.id);
       toast.success('Marked as completed.');
-    } catch (error) {
+    } catch {
       toast.error('Failed to update pickup.');
     } finally {
       setVolunteerActionId(null);
@@ -702,15 +704,9 @@ const DonorDashboard = () => {
     if (!auth.currentUser) return;
     setVolunteerActionId(item.id);
     try {
-      await updateDoc(doc(db, 'donations', item.id), {
-        status: 'available',
-        volunteerId: null,
-        volunteerName: null,
-        volunteerStatus: 'released',
-        volunteerReleasedAt: serverTimestamp(),
-      });
+      await releaseVolunteerPickup(item.id);
       toast.success('Pickup released.');
-    } catch (error) {
+    } catch {
       toast.error('Failed to release pickup.');
     } finally {
       setVolunteerActionId(null);
@@ -731,27 +727,19 @@ const DonorDashboard = () => {
     const [verifying, setVerifying] = useState(false);
 
     const handleVerify = async () => {
-      const expectedOtp = String(item.otp ?? '').trim();
       const providedOtp = otpInput.trim();
-      if (!expectedOtp || expectedOtp.length < 4) {
-        toast.error('OTP not available.');
-        return;
-      }
       if (providedOtp.length < 4) {
         toast.error('Enter the full OTP.');
         return;
       }
       setVerifying(true);
-      if (providedOtp === expectedOtp) {
-        try {
-          const docRef = doc(db, 'donations', item.id);
-          await updateDoc(docRef, { status: 'completed' });
-          toast.success('Pickup verified! +10 Karma Points');
-        } catch (e) {
-          toast.error('Error updating status');
-        }
-      } else {
-        toast.error('Wrong OTP!');
+      try {
+        await verifyDonationOtp(item.id, providedOtp);
+        toast.success('Pickup verified! +10 Karma Points');
+        setOtpInput('');
+      } catch (error: any) {
+        const message = typeof error?.message === 'string' ? error.message : 'Wrong OTP!';
+        toast.error(message);
       }
       setVerifying(false);
     };
@@ -777,15 +765,15 @@ const DonorDashboard = () => {
     );
   };
 
-  function LocationMarker() {
+  function LocationMarker({ currentLocation }: { currentLocation: { lat: number; lng: number } | null }) {
     const [position, setPosition] = useState<L.LatLng | null>(null);
     const map = useMap();
     useEffect(() => {
-      if (location) {
-        map.flyTo([location.lat, location.lng], 15);
-        setPosition(new L.LatLng(location.lat, location.lng));
+      if (currentLocation) {
+        map.flyTo([currentLocation.lat, currentLocation.lng], 15);
+        setPosition(new L.LatLng(currentLocation.lat, currentLocation.lng));
       }
-    }, [location, map]);
+    }, [currentLocation, map]);
     useMapEvents({
       click(e) {
         setPosition(e.latlng);
@@ -983,7 +971,7 @@ const DonorDashboard = () => {
 
                   {!hasAi && (
                     <p className="mt-3 text-xs font-bold text-red-600">
-                      Add <span className="font-black">VITE_GEMINI_API_KEY</span> in <code>.env</code> to enable AI tips.
+                      AI tips are temporarily unavailable.
                     </p>
                   )}
                   {aiTipsError && (
@@ -1186,7 +1174,7 @@ const DonorDashboard = () => {
               <motion.div initial={{ x: 20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} className="bg-white border-4 border-dark rounded-3xl overflow-hidden shadow-neo h-[500px] relative z-0">
                 <MapContainer center={[mapCenter.lat, mapCenter.lng]} zoom={mapZoom} style={{ height: '100%', width: '100%' }}>
                   <TileLayer attribution="&copy; OpenStreetMap" url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-                  <LocationMarker />
+                  <LocationMarker currentLocation={location} />
                 </MapContainer>
 
                 <div className="absolute top-3 left-3 right-3 flex flex-col gap-2 pointer-events-none">
@@ -1488,6 +1476,12 @@ const DonorDashboard = () => {
                               key={item.id}
                               className={`border-2 rounded-2xl p-4 shadow-neo transition-colors ${selectedVolunteerId === item.id ? 'border-blue-500 bg-blue-50' : 'border-dark bg-white'}`}
                               onClick={() => setSelectedVolunteerId(item.id)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter' || event.key === ' ') {
+                                  event.preventDefault();
+                                  setSelectedVolunteerId(item.id);
+                                }
+                              }}
                               role="button"
                               tabIndex={0}
                             >

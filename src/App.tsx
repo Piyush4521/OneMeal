@@ -1,96 +1,81 @@
-import { useEffect, useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { Toaster } from 'react-hot-toast'; 
-import { onAuthStateChanged } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore'; 
-import { auth, db } from './firebase'; 
-import { LanguageProvider } from './context/LanguageContext';
-import LandingPage from './pages/LandingPage';
-import LoginPage from './pages/LoginPage';
-import DonorDashboard from './pages/DonorDashboard';
-import RecipeHub from './pages/RecipeHub';
-import ReceiverDashboard from './pages/ReceiverDashboard';
-import AdminLogin from './pages/AdminLogin';
-import AdminDashboard from './pages/AdminDashboard';
-import { ChatBot } from './components/ChatBot';
+import { lazy, Suspense, type ReactElement } from 'react';
+import { BrowserRouter as Router, Navigate, Route, Routes } from 'react-router-dom';
+import { Toaster } from 'react-hot-toast';
+import { AuthLoadingScreen, BannedUserScreen } from './components/AuthScreens';
+import { AuthProvider, useAuthSession } from './context/AuthContext';
+import { getDashboardPath, type DashboardRole } from './lib/roles';
 
-const ProtectedRoute = ({ children }: { children: JSX.Element }) => {
-  const [user, setUser] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+const LandingPage = lazy(() => import('./pages/LandingPage'));
+const LoginPage = lazy(() => import('./pages/LoginPage'));
+const DonorDashboard = lazy(() => import('./pages/DonorDashboard'));
+const RecipeHub = lazy(() => import('./pages/RecipeHub'));
+const ReceiverDashboard = lazy(() => import('./pages/ReceiverDashboard'));
+const AdminLogin = lazy(() => import('./pages/AdminLogin'));
+const AdminDashboard = lazy(() => import('./pages/AdminDashboard'));
+const ChatBot = lazy(() => import('./components/ChatBot').then((module) => ({ default: module.ChatBot })));
 
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
+export const RouteLoader = () => (
+  <AuthLoadingScreen
+    title="Loading page"
+    message="OneMeal is preparing your page and checking your access."
+  />
+);
 
-  if (loading) return null; 
-  if (!user) { return <Navigate to="/login" />; }
-  return children;
-};
-const AdminRoute = ({ children }: { children: JSX.Element }) => {
-  const [loading, setLoading] = useState(true);
-  const [isAdmin, setIsAdmin] = useState(false);
+const getNonAdminRedirectPath = (role: DashboardRole | 'admin' | null | undefined) =>
+  role === 'donor' || role === 'receiver' ? getDashboardPath(role) : null;
 
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      if (currentUser) {
-        try {
-           const userRef = doc(db, "users", currentUser.uid);
-           const userSnap = await getDoc(userRef);
-           if (userSnap.exists() && userSnap.data().role === 'admin') {
-             setIsAdmin(true);
-           }
-        } catch (e) { console.error("Error verifying admin:", e); }
-      }
-      setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
+export const DashboardRoute = ({
+  children,
+  requiredRole,
+}: {
+  children: ReactElement;
+  requiredRole: DashboardRole;
+}) => {
+  const { isAuthenticated, isBanned, loading, role } = useAuthSession();
 
-  if (loading) return null;
-  if (!isAdmin) { return <Navigate to="/admin" />; }
-  return children;
+  if (loading) return <RouteLoader />;
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  if (isBanned) return <BannedUserScreen />;
+  if (role === requiredRole) return children;
+
+  const redirectPath = getDashboardPath(role);
+  if (redirectPath) return <Navigate to={redirectPath} replace />;
+  return <Navigate to="/login" replace />;
 };
 
-const LoginGuard = ({ children }: { children: JSX.Element }) => {
-  const [loading, setLoading] = useState(true);
-  const [redirectPath, setRedirectPath] = useState<string | null>(null);
-  
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      if (currentUser) {
-        try {
-            const userRef = doc(db, "users", currentUser.uid);
-            const userSnap = await getDoc(userRef);
+export const AdminRoute = ({ children }: { children: ReactElement }) => {
+  const { isAdmin, isAuthenticated, isBanned, loading, role } = useAuthSession();
 
-            if (userSnap.exists()) {
-                const role = userSnap.data().role;
-                if (role === 'receiver') setRedirectPath('/receiver');
-                else if (role === 'donor') setRedirectPath('/donor');
-                else setRedirectPath(null); 
-            } else {
-                setRedirectPath(null); 
-            }
-        } catch (e) { console.error("Error fetching user role:", e); }
-      }
-      setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
+  if (loading) return <RouteLoader />;
+  if (!isAuthenticated) return <Navigate to="/admin" replace />;
+  if (isBanned) return <BannedUserScreen />;
+  if (isAdmin) return children;
 
-  if (loading) return null;
-  if (redirectPath) { return <Navigate to={redirectPath} />; }
+  const redirectPath = getNonAdminRedirectPath(role);
+  if (redirectPath) return <Navigate to={redirectPath} replace />;
+  return <Navigate to="/admin" replace />;
+};
+
+export const LoginGuard = ({ children }: { children: ReactElement }) => {
+  const { isAdmin, isAuthenticated, isBanned, loading, role } = useAuthSession();
+
+  if (loading) return <RouteLoader />;
+  if (isBanned) return <BannedUserScreen />;
+  if (!isAuthenticated) return children;
+
+  const redirectPath = isAdmin ? '/admin-dashboard' : getNonAdminRedirectPath(role);
+  if (redirectPath) return <Navigate to={redirectPath} replace />;
   return children;
 };
 
-function App() {
+const AppShell = () => {
+  const { isBanned } = useAuthSession();
+
   return (
-    <LanguageProvider>
-      <Router>
-        <Toaster position="top-center" toastOptions={{
+    <Router>
+      <Toaster
+        position="top-center"
+        toastOptions={{
           duration: 3000,
           style: {
             border: '2px solid #171717',
@@ -99,40 +84,64 @@ function App() {
             fontWeight: 'bold',
             boxShadow: '4px 4px 0px 0px rgba(0,0,0,1)',
           },
-        }}/>
-        
+        }}
+      />
+
+      <Suspense fallback={<RouteLoader />}>
         <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route path="/recipes" element={<RecipeHub />} />
           <Route path="/admin" element={<AdminLogin />} />
-          <Route path="/admin-dashboard" element={
-            <AdminRoute>
-              <AdminDashboard />
-            </AdminRoute>
-          } />
-
-          <Route path="/login" element={
-            <LoginGuard>
-              <LoginPage />
-            </LoginGuard>
-          } />
-          
-          <Route path="/donor" element={
-            <ProtectedRoute>
-              <DonorDashboard />
-            </ProtectedRoute>
-          } />
-          
-          <Route path="/receiver" element={
-            <ProtectedRoute>
-              <ReceiverDashboard />
-            </ProtectedRoute>
-          } />
+          <Route
+            path="/admin-dashboard"
+            element={(
+              <AdminRoute>
+                <AdminDashboard />
+              </AdminRoute>
+            )}
+          />
+          <Route
+            path="/login"
+            element={(
+              <LoginGuard>
+                <LoginPage />
+              </LoginGuard>
+            )}
+          />
+          <Route
+            path="/donor"
+            element={(
+              <DashboardRoute requiredRole="donor">
+                <DonorDashboard />
+              </DashboardRoute>
+            )}
+          />
+          <Route
+            path="/receiver"
+            element={(
+              <DashboardRoute requiredRole="receiver">
+                <ReceiverDashboard />
+              </DashboardRoute>
+            )}
+          />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+      </Suspense>
 
-        <ChatBot />
-      </Router>
-    </LanguageProvider>
+      {!isBanned && (
+        <Suspense fallback={null}>
+          <ChatBot />
+        </Suspense>
+      )}
+    </Router>
+  );
+};
+
+function App() {
+  return (
+    <AuthProvider>
+      <AppShell />
+    </AuthProvider>
   );
 }
 
