@@ -5,7 +5,7 @@ import { Users, Megaphone, Ban, CheckCircle, Coins, LogOut, Package, MapPin, Act
 import { useNavigate } from 'react-router-dom';
 import { NeoButton } from '../components/ui/NeoButton';
 import toast from 'react-hot-toast';
-import { generateText, isGeminiConfigured } from '../lib/aiClient';
+import { generateJson, isGeminiConfigured, type GeminiResponseSchema } from '../lib/aiClient';
 import { openChat } from '../lib/chatEvents';
 
 const ANNOUNCEMENT_TEMPLATES = [
@@ -45,6 +45,28 @@ type ActivityItem =
       time: number;
       banned?: boolean;
     };
+
+const ADMIN_LIST_SCHEMA: GeminiResponseSchema = {
+  type: 'OBJECT',
+  properties: {
+    items: {
+      type: 'ARRAY',
+      items: { type: 'STRING' },
+    },
+  },
+  required: ['items'],
+};
+
+const normalizeAiItems = (payload: unknown, limit: number) => {
+  if (!payload || typeof payload !== 'object' || !Array.isArray((payload as { items?: unknown[] }).items)) {
+    return [];
+  }
+
+  return (payload as { items?: unknown[] }).items
+    ?.map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean)
+    .slice(0, limit) || [];
+};
 
 const AdminDashboard = () => {
   const navigate = useNavigate();
@@ -451,18 +473,11 @@ const AdminDashboard = () => {
       return { recent, withTitle };
   }, [suggestions]);
 
-  const hasAi = isGeminiConfigured();
-
-  const parseAiLines = (text: string) =>
-      text
-          .split('\n')
-          .map((line) => line.replace(/^[-*]\s?/, '').trim())
-          .filter(Boolean)
-          .slice(0, 5);
+  const hasAi = isGeminiConfigured('admin');
 
   const handleAiSummary = async () => {
       if (!hasAi) {
-          toast.error('AI summary needs VITE_GEMINI_API_KEY.');
+          toast.error('AI summary needs VITE_GEMINI_API_KEY_ADMIN or VITE_GEMINI_API_KEY.');
           return;
       }
       if (!filteredSuggestions.length) {
@@ -475,19 +490,32 @@ const AdminDashboard = () => {
       setAiSummaryError(null);
       setAiSummary([]);
       try {
-          const sample = filteredSuggestions.slice(0, 8).map((s, idx) => {
-              return `#${idx + 1} ${s.title || 'Suggestion'}: ${s.message || ''}`.slice(0, 140);
+          const sample = filteredSuggestions.slice(0, 10).map((s, idx) => {
+              return [
+                  `#${idx + 1}`,
+                  `title: ${s.title || 'Suggestion'}`,
+                  `user: ${s.userName || 'Anonymous'}`,
+                  `message: ${(s.message || '').slice(0, 180)}`,
+              ].join(' | ');
           }).join('\n');
 
           const prompt = [
-              'You are an admin assistant.',
-              'Summarize main themes and urgent items from these suggestions.',
-              'Return 4 short bullets, each starting with "- ".',
+              'You are the operations copilot for OneMeal admins.',
+              'Review these user suggestions and return JSON with key "items".',
+              '"items" must contain 4 short action-ready lines.',
+              'Cover repeated themes, urgent bugs, user friction, and the next best admin action.',
               sample
           ].join('\n');
 
-          const reply = await generateText({ prompt, maxOutputTokens: 180 });
-          const lines = parseAiLines(reply);
+          const payload = await generateJson<{ items: string[] }>({
+              prompt,
+              maxOutputTokens: 260,
+              temperature: 0.2,
+              schema: ADMIN_LIST_SCHEMA,
+              systemInstruction: 'Return valid JSON only. Keep each item short and useful for an admin dashboard.',
+              feature: 'admin',
+          });
+          const lines = normalizeAiItems(payload, 4);
           if (!lines.length) {
               setAiSummaryError('AI summary empty. Try again.');
           } else {
@@ -503,7 +531,7 @@ const AdminDashboard = () => {
 
   const handleAiIssues = async () => {
       if (!hasAi) {
-          toast.error('AI insights need VITE_GEMINI_API_KEY.');
+          toast.error('AI insights need VITE_GEMINI_API_KEY_ADMIN or VITE_GEMINI_API_KEY.');
           return;
       }
       if (!reportedDonations.length) {
@@ -517,18 +545,34 @@ const AdminDashboard = () => {
       setAiIssueSummary([]);
       try {
           const sample = reportedDonations.slice(0, 6).map((d, idx) => {
-              return `#${idx + 1} ${d.foodItem || 'Donation'} | ${d.quantity || 'qty?'} | ${d.donorName || 'donor?'} | ${d.address || 'location?'}`;
+              return [
+                  `#${idx + 1}`,
+                  `food: ${d.foodItem || 'Donation'}`,
+                  `qty: ${d.quantity || 'qty?'}`,
+                  `donor: ${d.donorName || 'donor?'}`,
+                  `pickup: ${d.pickupPreference || 'asap'}`,
+                  `verified: ${d.verified ? 'yes' : 'no'}`,
+                  `address: ${d.address || 'location?'}`,
+              ].join(' | ');
           }).join('\n');
 
           const prompt = [
-              'You are an admin assistant.',
-              'Identify patterns or risks from reported donations.',
-              'Return 3 short bullets, each starting with "- ".',
+              'You are the trust and safety copilot for OneMeal admins.',
+              'Review these reported donations and return JSON with key "items".',
+              '"items" must contain 3 short lines.',
+              'Focus on suspicious patterns, likely operational risk, and the next admin action.',
               sample
           ].join('\n');
 
-          const reply = await generateText({ prompt, maxOutputTokens: 160 });
-          const lines = parseAiLines(reply);
+          const payload = await generateJson<{ items: string[] }>({
+              prompt,
+              maxOutputTokens: 220,
+              temperature: 0.2,
+              schema: ADMIN_LIST_SCHEMA,
+              systemInstruction: 'Return valid JSON only. Keep each item short, concrete, and useful for a trust review.',
+              feature: 'admin',
+          });
+          const lines = normalizeAiItems(payload, 3);
           if (!lines.length) {
               setAiIssueError('AI insight empty. Try again.');
           } else {
@@ -1222,7 +1266,7 @@ const AdminDashboard = () => {
                             </div>
                             {!hasAi && (
                                 <p className="mt-2 text-[10px] font-bold text-red-600">
-                                    Add <span className="font-black">VITE_GEMINI_API_KEY</span> in <code>.env</code> to enable.
+                                    Add <span className="font-black">VITE_GEMINI_API_KEY_ADMIN</span> or <span className="font-black">VITE_GEMINI_API_KEY</span> in <code>.env</code> to enable.
                                 </p>
                             )}
                             {aiIssueError && (
@@ -1316,7 +1360,7 @@ const AdminDashboard = () => {
                             </div>
                             {!hasAi && (
                                 <p className="mt-2 text-[10px] font-bold text-red-600">
-                                    Add <span className="font-black">VITE_GEMINI_API_KEY</span> in <code>.env</code> to enable.
+                                    Add <span className="font-black">VITE_GEMINI_API_KEY_ADMIN</span> or <span className="font-black">VITE_GEMINI_API_KEY</span> in <code>.env</code> to enable.
                                 </p>
                             )}
                             {aiSummaryError && (

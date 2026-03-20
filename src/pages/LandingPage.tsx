@@ -28,6 +28,9 @@ import {
 import { Link, useNavigate } from 'react-router-dom';
 import { NeoButton } from '../components/ui/NeoButton';
 import foodImage from '../assets/img3.png';
+import storyImage1 from '../assets/img11.png';
+import storyImage2 from '../assets/img12.png';
+import storyImage3 from '../assets/img13.png';
 import { auth, db } from '../firebase';
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import { addDoc, collection, doc, getDocs, onSnapshot, query, serverTimestamp, where } from 'firebase/firestore';
@@ -110,16 +113,19 @@ const motivationLines = [
 
 const galleryItems = [
   {
+    image: storyImage1,
     title: 'Wedding Surplus, 300 Meals',
     detail: 'Recovered in 40 minutes with 2 volunteers.',
     tag: 'Solapur',
   },
   {
+    image: storyImage2,
     title: 'Hostel Kitchen Drive',
     detail: 'Weekly routine, consistent supply.',
     tag: 'Pune',
   },
   {
+    image: storyImage3,
     title: 'Restaurant Rescue',
     detail: 'Daily close-out pickups, zero waste.',
     tag: 'Mumbai',
@@ -908,7 +914,7 @@ const LandingPage = () => {
                 className="bg-white border-4 border-dark rounded-3xl overflow-hidden shadow-neo"
               >
                 <div className="h-48 overflow-hidden border-b-4 border-dark">
-                  <img src={foodImage} alt={item.title} className="w-full h-full object-cover" />
+                  <img src={item.image} alt={item.title} className="w-full h-full object-cover" />
                 </div>
                 <div className="p-5">
                   <div className="text-xs font-black uppercase text-gray-500">{item.tag}</div>

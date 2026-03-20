@@ -8,7 +8,7 @@ import type { Timestamp } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
-import { generateText, isGeminiConfigured, verifyFoodImage } from '../lib/aiClient';
+import { generateJson, isGeminiConfigured, verifyFoodImage, type GeminiResponseSchema } from '../lib/aiClient';
 import { openChat } from '../lib/chatEvents';
 import GoogleTranslate from '../components/GoogleTranslate';
 import { MapContainer, TileLayer, Marker, Popup, useMapEvents, useMap } from 'react-leaflet';
@@ -55,6 +55,17 @@ const AI_TIMEOUT_MS = 20000;
 const DEFAULT_CENTER = { lat: 20.5937, lng: 78.9629 };
 const DRAFT_STORAGE_KEY = 'donorDraftV1';
 const MAX_IMAGE_MB = 6;
+
+const DONOR_TIPS_SCHEMA: GeminiResponseSchema = {
+  type: 'OBJECT',
+  properties: {
+    items: {
+      type: 'ARRAY',
+      items: { type: 'STRING' },
+    },
+  },
+  required: ['items'],
+};
 
 const dateFormatter = new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeStyle: 'short' });
 
@@ -294,14 +305,17 @@ const DonorDashboard = () => {
   const isPhoneValid = cleanedPhone.length >= 10 && cleanedPhone.length <= 15;
   const isFormComplete = Boolean(trimmedFoodItem && trimmedQuantity && trimmedAddress && isPhoneValid);
   const canSubmit = isFormComplete && isVerified && !loading;
-  const hasAi = isGeminiConfigured();
+  const hasAi = isGeminiConfigured('donor');
+  const normalizeAiTips = (payload: unknown) => {
+    if (!payload || typeof payload !== 'object' || !Array.isArray((payload as { items?: unknown[] }).items)) {
+      return [];
+    }
 
-  const parseAiTips = (text: string) =>
-    text
-      .split('\n')
-      .map((line) => line.replace(/^[-*]\s?/, '').trim())
+    return (payload as { items?: unknown[] }).items
+      ?.map((item) => (typeof item === 'string' ? item.trim() : ''))
       .filter(Boolean)
-      .slice(0, 5);
+      .slice(0, 4) || [];
+  };
 
   const mapCenter = location ?? DEFAULT_CENTER;
   const mapZoom = location ? 15 : 4;
@@ -452,7 +466,7 @@ const DonorDashboard = () => {
 
   const handleAiTips = async () => {
     if (!hasAi) {
-      toast.error('AI tips need VITE_GEMINI_API_KEY.');
+      toast.error('AI tips need VITE_GEMINI_API_KEY_DONOR or VITE_GEMINI_API_KEY.');
       return;
     }
     if (!trimmedFoodItem && !trimmedQuantity && !trimmedAddress) {
@@ -467,8 +481,9 @@ const DonorDashboard = () => {
     try {
       const prompt = [
         'You improve food donation listings.',
-        'Give 3 short tips plus 1 estimated servings line.',
-        'Return exactly 4 lines, each starting with "- ".',
+        'Return JSON with key "items".',
+        '"items" should contain 4 short lines.',
+        'Include 3 practical listing tips and 1 estimated servings line.',
         `Food item: ${trimmedFoodItem || 'unknown'}`,
         `Quantity: ${trimmedQuantity || 'unknown'}`,
         `Food type: ${foodType}`,
@@ -477,8 +492,15 @@ const DonorDashboard = () => {
         `Phone valid: ${isPhoneValid ? 'yes' : 'no'}`,
       ].join('\n');
 
-      const reply = await generateText({ prompt, maxOutputTokens: 160 });
-      const tips = parseAiTips(reply);
+      const payload = await generateJson<{ items: string[] }>({
+        prompt,
+        maxOutputTokens: 220,
+        temperature: 0.2,
+        schema: DONOR_TIPS_SCHEMA,
+        systemInstruction: 'Return valid JSON only. Keep each line short and practical for a food donor.',
+        feature: 'donor',
+      });
+      const tips = normalizeAiTips(payload);
       if (!tips.length) {
         setAiTipsError('AI did not return tips. Try again.');
       } else {
@@ -508,7 +530,7 @@ const DonorDashboard = () => {
     const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
 
     try {
-      const isFood = await verifyFoodImage({ file: imageFile, signal: controller.signal });
+      const isFood = await verifyFoodImage({ file: imageFile, signal: controller.signal, feature: 'donor' });
       toast.dismiss(toastId);
 
       if (isFood) {
@@ -525,6 +547,8 @@ const DonorDashboard = () => {
       toast.dismiss(toastId);
       if (error?.name === 'AbortError') {
         toast.error('AI check timed out. Please try again.');
+      } else if (/quota|limit|resource exhausted|429/i.test(error?.message || '')) {
+        toast.error('Image verify is busy right now. Please wait a few seconds and retry.');
       } else {
         toast.error('AI Error: ' + (error.message || 'Connection failed'));
       }
@@ -983,7 +1007,7 @@ const DonorDashboard = () => {
 
                   {!hasAi && (
                     <p className="mt-3 text-xs font-bold text-red-600">
-                      Add <span className="font-black">VITE_GEMINI_API_KEY</span> in <code>.env</code> to enable AI tips.
+                      Add <span className="font-black">VITE_GEMINI_API_KEY_DONOR</span> or <span className="font-black">VITE_GEMINI_API_KEY</span> in <code>.env</code> to enable AI tips.
                     </p>
                   )}
                   {aiTipsError && (

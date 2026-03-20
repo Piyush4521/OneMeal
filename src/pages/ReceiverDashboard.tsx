@@ -6,7 +6,7 @@ import { NeoButton } from '../components/ui/NeoButton';
 import { db, auth } from '../firebase';
 import { collection, query, where, onSnapshot, doc, updateDoc } from 'firebase/firestore';
 import toast from 'react-hot-toast';
-import { generateText, isGeminiConfigured } from '../lib/aiClient';
+import { generateJson, isGeminiConfigured, type GeminiResponseSchema } from '../lib/aiClient';
 import { openChat } from '../lib/chatEvents';
 import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -81,6 +81,41 @@ function MapUpdater({ center }: { center: { lat: number, lng: number } | null })
     return null;
 }
 
+const NGO_PICK_SCHEMA: GeminiResponseSchema = {
+    type: 'OBJECT',
+    properties: {
+        picks: {
+            type: 'ARRAY',
+            items: {
+                type: 'OBJECT',
+                properties: {
+                    title: { type: 'STRING' },
+                    reason: { type: 'STRING' },
+                },
+                required: ['title', 'reason'],
+            },
+        },
+    },
+    required: ['picks'],
+};
+
+const normalizeNgoPicks = (payload: unknown) => {
+    if (!payload || typeof payload !== 'object' || !Array.isArray((payload as { picks?: unknown[] }).picks)) {
+        return [];
+    }
+
+    return (payload as { picks?: unknown[] }).picks
+        ?.map((item) => {
+            if (!item || typeof item !== 'object') return '';
+            const title = typeof (item as { title?: string }).title === 'string' ? (item as { title?: string }).title?.trim() : '';
+            const reason = typeof (item as { reason?: string }).reason === 'string' ? (item as { reason?: string }).reason?.trim() : '';
+            if (!title && !reason) return '';
+            return title ? `${title}: ${reason || 'Good pickup fit.'}` : reason;
+        })
+        .filter(Boolean)
+        .slice(0, 3) || [];
+};
+
 const ReceiverDashboard = () => {
   const [activeTab, setActiveTab] = useState<'feed' | 'pickups' | 'history'>('feed');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -143,14 +178,7 @@ const ReceiverDashboard = () => {
 
   const activePickups = myClaims.filter(d => d.status === 'claimed');
   const historyPickups = myClaims.filter(d => d.status === 'completed');
-  const hasAi = isGeminiConfigured();
-
-  const parseAiLines = (text: string) =>
-    text
-      .split('\n')
-      .map((line) => line.replace(/^[-*]\s?/, '').trim())
-      .filter(Boolean)
-      .slice(0, 4);
+  const hasAi = isGeminiConfigured('receiver');
 
   const handleLogout = () => {
     auth.signOut();
@@ -160,7 +188,7 @@ const ReceiverDashboard = () => {
 
   const handleAiPickups = async () => {
     if (!hasAi) {
-      toast.error('AI tips need VITE_GEMINI_API_KEY.');
+      toast.error('AI tips need VITE_GEMINI_API_KEY_RECEIVER or VITE_GEMINI_API_KEY.');
       return;
     }
     if (sortedDonations.length === 0) {
@@ -180,14 +208,22 @@ const ReceiverDashboard = () => {
       }).join('\n');
 
       const prompt = [
-        'You help an NGO decide which food pickup to claim.',
-        'Pick top 3 from the list with short reasons.',
-        'Return exactly 3 lines starting with "- ".',
+        'You help an NGO decide which food pickup to claim first.',
+        'Return JSON with key "picks".',
+        'Choose the 3 best pickups based on distance, quantity, urgency, and clarity.',
+        'Each pick needs title and reason.',
         list,
       ].join('\n');
 
-      const reply = await generateText({ prompt, maxOutputTokens: 160 });
-      const picks = parseAiLines(reply);
+      const payload = await generateJson<{ picks: Array<{ title: string; reason: string }> }>({
+        prompt,
+        maxOutputTokens: 260,
+        temperature: 0.2,
+        schema: NGO_PICK_SCHEMA,
+        systemInstruction: 'Return valid JSON only. Keep each reason short and useful for an NGO dispatcher.',
+        feature: 'receiver',
+      });
+      const picks = normalizeNgoPicks(payload);
       if (!picks.length) {
         setAiPickupsError('AI did not return picks. Try again.');
       } else {
@@ -285,7 +321,7 @@ const ReceiverDashboard = () => {
 
                             {!hasAi && (
                                 <p className="mt-2 text-[10px] font-bold text-red-600">
-                                    Add <span className="font-black">VITE_GEMINI_API_KEY</span> in <code>.env</code> to enable.
+                                    Add <span className="font-black">VITE_GEMINI_API_KEY_RECEIVER</span> or <span className="font-black">VITE_GEMINI_API_KEY</span> in <code>.env</code> to enable.
                                 </p>
                             )}
                             {aiPickupsError && (
