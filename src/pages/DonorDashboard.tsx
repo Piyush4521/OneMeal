@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion } from 'framer-motion';
 import { Send, MapPin, Package, Phone, Award, LocateFixed, CheckCircle, LockKeyhole, AlertCircle, Camera, Sparkles, XCircle, Leaf, Beef, Menu, History, Gift, MessageSquare, Info, Search, ArrowUpDown, Filter, Repeat, RefreshCw, Compass, Navigation, ShieldCheck, UserCheck } from 'lucide-react';
 import { NeoButton } from '../components/ui/NeoButton';
@@ -120,6 +120,31 @@ const getKarmaLevel = (karma: number) => {
   return { label: 'Legend', className: 'bg-purple-100 text-purple-700 border-purple-200' };
 };
 
+const getActionErrorMessage = (error: unknown, fallback: string) => {
+  const code =
+    typeof error === 'object' && error && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code
+      : '';
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : '';
+
+  if (/permission-denied|storage\/unauthorized/i.test(code) || /permission|insufficient/i.test(message)) {
+    return 'Permission denied. Please sign in again or update Firebase rules.';
+  }
+  if (/unauth|auth\//i.test(code) || /sign in|login/i.test(message)) {
+    return 'Please sign in again and retry.';
+  }
+  if (/unavailable|network-request-failed/i.test(code) || /network|offline|failed to fetch/i.test(message)) {
+    return 'Network issue detected. Please check your internet and retry.';
+  }
+
+  return message ? `${fallback} ${message}` : fallback;
+};
+
 const DonorDashboard = () => {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<'donate' | 'history' | 'guide' | 'volunteer' | 'suggestions'>('donate');
@@ -140,6 +165,9 @@ const DonorDashboard = () => {
   const [aiVerifying, setAiVerifying] = useState(false);
   const [isVerified, setIsVerified] = useState(false);
   const [suggestionText, setSuggestionText] = useState('');
+  const [formError, setFormError] = useState<string | null>(null);
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
+  const [suggestionSubmitting, setSuggestionSubmitting] = useState(false);
   const [aiTips, setAiTips] = useState<string[]>([]);
   const [aiTipsLoading, setAiTipsLoading] = useState(false);
   const [aiTipsError, setAiTipsError] = useState<string | null>(null);
@@ -155,6 +183,8 @@ const DonorDashboard = () => {
   const [volunteerError, setVolunteerError] = useState<string | null>(null);
   const [selectedVolunteerId, setSelectedVolunteerId] = useState<string | null>(null);
   const [volunteerActionId, setVolunteerActionId] = useState<string | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
+  const galleryInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -399,6 +429,20 @@ const DonorDashboard = () => {
 
   const goToHome = () => navigate('/');
 
+  const resetImageInputs = () => {
+    if (cameraInputRef.current) cameraInputRef.current.value = '';
+    if (galleryInputRef.current) galleryInputRef.current.value = '';
+  };
+
+  const clearSelectedImage = () => {
+    if (imagePreview) URL.revokeObjectURL(imagePreview);
+    setImageFile(null);
+    setImagePreview(null);
+    setIsVerified(false);
+    setFormError(null);
+    resetImageInputs();
+  };
+
   const resetForm = (options?: { preserveLocation?: boolean }) => {
     setFoodItem('');
     setQuantity('');
@@ -409,8 +453,10 @@ const DonorDashboard = () => {
     setImageFile(null);
     setImagePreview(null);
     setIsVerified(false);
+    setFormError(null);
     setAiTips([]);
     setAiTipsError(null);
+    resetImageInputs();
     if (!options?.preserveLocation) setLocation(null);
     try {
       localStorage.removeItem(DRAFT_STORAGE_KEY);
@@ -449,19 +495,26 @@ const DonorDashboard = () => {
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file) {
+      e.target.value = '';
+      return;
+    }
     if (!file.type.startsWith('image/')) {
       toast.error('Please select an image file.');
+      e.target.value = '';
       return;
     }
     if (file.size > MAX_IMAGE_MB * 1024 * 1024) {
       toast.error(`Image too large. Max ${MAX_IMAGE_MB}MB.`);
+      e.target.value = '';
       return;
     }
     if (imagePreview) URL.revokeObjectURL(imagePreview);
     setImageFile(file);
     setImagePreview(URL.createObjectURL(file));
     setIsVerified(false);
+    setFormError(null);
+    e.target.value = '';
   };
 
   const handleAiTips = async () => {
@@ -568,6 +621,10 @@ const DonorDashboard = () => {
       toast.error('Please verify food with AI first.');
       return;
     }
+    if (!imageFile) {
+      toast.error('Please add a food image first.');
+      return;
+    }
     if (!trimmedFoodItem || !trimmedQuantity || !trimmedAddress || !phone) {
       toast.error('Fill all fields');
       return;
@@ -578,6 +635,7 @@ const DonorDashboard = () => {
     }
 
     setLoading(true);
+    setFormError(null);
 
     try {
       await addDoc(collection(db, 'donations'), {
@@ -600,8 +658,10 @@ const DonorDashboard = () => {
 
       resetForm({ preserveLocation: true });
     } catch (error) {
-      console.error(error);
-      toast.error('Failed to donate.');
+      console.error('Donation create error:', error);
+      const message = getActionErrorMessage(error, 'Failed to donate.');
+      setFormError(message);
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -610,18 +670,36 @@ const DonorDashboard = () => {
   const submitSuggestion = async () => {
     const trimmed = suggestionText.trim();
     if (trimmed.length < 3) return toast.error('Please write something...');
+    if (!auth.currentUser) {
+      const message = 'Please sign in again before sending a suggestion.';
+      setSuggestionError(message);
+      toast.error(message);
+      return;
+    }
+
+    setSuggestionSubmitting(true);
+    setSuggestionError(null);
     try {
       await addDoc(collection(db, 'suggestions'), {
         message: trimmed,
-        userId: auth.currentUser?.uid,
-        userName: auth.currentUser?.displayName || 'Anonymous',
+        userId: auth.currentUser.uid,
+        userName: auth.currentUser.displayName || 'Anonymous',
+        userEmail: auth.currentUser.email || '',
         createdAt: serverTimestamp(),
+        createdAtClient: Date.now(),
         title: 'Donor Suggestion',
+        role: 'donor',
+        source: 'donor-dashboard',
       });
       toast.success('Thanks! Your suggestion was sent to Admin.');
       setSuggestionText('');
-    } catch (e) {
-      toast.error('Failed to send');
+    } catch (error) {
+      console.error('Suggestion submit error:', error);
+      const message = getActionErrorMessage(error, 'Failed to send suggestion.');
+      setSuggestionError(message);
+      toast.error(message);
+    } finally {
+      setSuggestionSubmitting(false);
     }
   };
 
@@ -638,8 +716,9 @@ const DonorDashboard = () => {
         issueType: 'donation',
       });
       toast.success('Issue reported to Admin.');
-    } catch (e) {
-      toast.error('Failed to report issue.');
+    } catch (error) {
+      console.error('Donation issue report error:', error);
+      toast.error(getActionErrorMessage(error, 'Failed to report issue.'));
     }
   };
 
@@ -1061,46 +1140,84 @@ const DonorDashboard = () => {
                   </div>
 
                   <div className="p-4 border-2 border-dashed border-dark rounded-xl bg-gray-50 text-center relative overflow-hidden">
-                    <input type="file" accept="image/*" capture="environment" onChange={handleImageSelect} className="hidden" id="food-camera" />
+                    <input
+                      ref={cameraInputRef}
+                      type="file"
+                      accept="image/*"
+                      capture="environment"
+                      onChange={handleImageSelect}
+                      className="hidden"
+                      id="food-camera"
+                    />
+                    <input
+                      ref={galleryInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={handleImageSelect}
+                      className="hidden"
+                      id="food-gallery"
+                    />
 
                     {!imagePreview ? (
-                      <label htmlFor="food-camera" className="cursor-pointer flex flex-col items-center gap-2 py-4">
-                        <div className="bg-white p-3 rounded-full border-2 border-dark shadow-sm hover:scale-110 transition-transform">
+                      <div className="flex flex-col items-center gap-3 py-4">
+                        <div className="bg-white p-3 rounded-full border-2 border-dark shadow-sm">
                           <Camera size={32} className="text-dark" />
                         </div>
                         <span className="font-bold text-gray-600">Take Photo (Required)</span>
-                        <span className="text-xs text-gray-500">Clear, bright photo helps AI verify faster.</span>
-                      </label>
+                        <span className="text-xs text-gray-500">Clear, bright photos help AI verify faster.</span>
+                        <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
+                          <button
+                            type="button"
+                            onClick={() => cameraInputRef.current?.click()}
+                            className="px-4 py-2 rounded-xl border-2 border-dark bg-white font-bold hover:bg-gray-100"
+                          >
+                            Take Photo
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => galleryInputRef.current?.click()}
+                            className="px-4 py-2 rounded-xl border-2 border-dark bg-blue-100 font-bold hover:bg-blue-200"
+                          >
+                            Upload Image
+                          </button>
+                        </div>
+                        <span className="text-xs text-gray-500">JPG or PNG up to {MAX_IMAGE_MB}MB. You can retry the same photo if needed.</span>
+                      </div>
                     ) : (
                       <div className="relative">
                         <img src={imagePreview} alt="Preview" className="w-full h-48 object-cover rounded-lg border-2 border-dark" />
                         <button
                           type="button"
-                          onClick={() => {
-                            setImageFile(null);
-                            setImagePreview(null);
-                            setIsVerified(false);
-                          }}
+                          onClick={clearSelectedImage}
                           className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full border border-dark z-10 hover:scale-110"
                           aria-label="Remove photo"
                         >
                           <XCircle size={20} />
                         </button>
-                        {!isVerified ? (
-                          <NeoButton
+                        <div className="mt-3 flex flex-col sm:flex-row gap-3">
+                          <button
                             type="button"
-                            onClick={verifyFoodWithAI}
-                            disabled={aiVerifying}
-                            className="mt-3 w-full bg-blue-500 hover:bg-blue-600 text-white flex items-center justify-center gap-2"
+                            onClick={() => galleryInputRef.current?.click()}
+                            className="w-full sm:w-auto px-4 py-2 rounded-xl border-2 border-dark bg-white font-bold hover:bg-gray-100"
                           >
-                            {aiVerifying ? <Sparkles className="animate-spin" /> : <Sparkles />}
-                            {aiVerifying ? 'AI Checking...' : 'Verify with AI'}
-                          </NeoButton>
-                        ) : (
-                          <div className="mt-2 bg-green-100 text-green-800 font-bold py-2 rounded border border-green-500 flex items-center justify-center gap-2">
-                            <CheckCircle size={18} /> Food Verified
-                          </div>
-                        )}
+                            Change Image
+                          </button>
+                          {!isVerified ? (
+                            <NeoButton
+                              type="button"
+                              onClick={verifyFoodWithAI}
+                              disabled={aiVerifying}
+                              className="w-full bg-blue-500 hover:bg-blue-600 text-white flex items-center justify-center gap-2"
+                            >
+                              {aiVerifying ? <Sparkles className="animate-spin" /> : <Sparkles />}
+                              {aiVerifying ? 'AI Checking...' : 'Verify with AI'}
+                            </NeoButton>
+                          ) : (
+                            <div className="w-full bg-green-100 text-green-800 font-bold py-2 rounded border border-green-500 flex items-center justify-center gap-2">
+                              <CheckCircle size={18} /> Food Verified
+                            </div>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1116,7 +1233,10 @@ const DonorDashboard = () => {
                           className="w-full outline-none font-bold text-sm bg-transparent"
                           value={foodItem}
                           maxLength={60}
-                          onChange={(e) => setFoodItem(e.target.value)}
+                          onChange={(e) => {
+                            setFoodItem(e.target.value);
+                            setFormError(null);
+                          }}
                         />
                       </div>
                     </div>
@@ -1130,7 +1250,10 @@ const DonorDashboard = () => {
                           className="w-full outline-none font-bold text-sm bg-transparent"
                           value={quantity}
                           maxLength={40}
-                          onChange={(e) => setQuantity(e.target.value)}
+                          onChange={(e) => {
+                            setQuantity(e.target.value);
+                            setFormError(null);
+                          }}
                         />
                       </div>
                     </div>
@@ -1140,16 +1263,19 @@ const DonorDashboard = () => {
                     <label className="font-bold block mb-1 text-sm">Phone</label>
                     <div className="flex items-center border-2 border-dark rounded-xl px-3 py-3 bg-white">
                       <Phone className="text-gray-500 mr-3" size={20} />
-                      <input
-                        type="tel"
-                        inputMode="numeric"
-                        autoComplete="tel"
-                        placeholder="9876543210"
-                        className="w-full outline-none font-bold bg-transparent"
-                        value={phone}
-                        maxLength={15}
-                        onChange={(e) => setPhone(e.target.value)}
-                      />
+                        <input
+                          type="tel"
+                          inputMode="numeric"
+                          autoComplete="tel"
+                          placeholder="9876543210"
+                          className="w-full outline-none font-bold bg-transparent"
+                          value={phone}
+                          maxLength={15}
+                          onChange={(e) => {
+                            setPhone(e.target.value);
+                            setFormError(null);
+                          }}
+                        />
                     </div>
                     {phone && !isPhoneValid && <p className="text-xs text-red-600 font-bold mt-1 ml-1">Enter a valid phone number.</p>}
                   </div>
@@ -1165,7 +1291,10 @@ const DonorDashboard = () => {
                           autoComplete="street-address"
                           className="w-full outline-none font-bold bg-transparent"
                           value={address}
-                          onChange={(e) => setAddress(e.target.value)}
+                          onChange={(e) => {
+                            setAddress(e.target.value);
+                            setFormError(null);
+                          }}
                         />
                       </div>
                       <NeoButton type="button" onClick={handleGetLocation} className="px-4 bg-secondary text-dark hover:bg-yellow-400">
@@ -1200,6 +1329,7 @@ const DonorDashboard = () => {
                       </>
                     )}
                   </NeoButton>
+                  {formError && <p className="text-xs font-bold text-red-600 text-center">{formError}</p>}
 
                   <button type="button" onClick={() => resetForm({ preserveLocation: true })} className="text-xs font-bold text-gray-500 hover:text-dark underline w-full">
                     Reset form
@@ -1662,7 +1792,13 @@ const DonorDashboard = () => {
               <h2 className="text-3xl font-black mb-6 flex items-center gap-2">
                 <MessageSquare size={32} /> Suggestions Box
               </h2>
-              <div className="bg-white border-4 border-dark rounded-3xl p-8 shadow-neo">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void submitSuggestion();
+                }}
+                className="bg-white border-4 border-dark rounded-3xl p-8 shadow-neo"
+              >
                 <p className="font-bold text-gray-600 mb-4">
                   Found a bug? Have an idea? Or just want to appreciate us? Write to us directly. Admin reads everything!
                 </p>
@@ -1671,16 +1807,21 @@ const DonorDashboard = () => {
                   placeholder="Type your message here..."
                   value={suggestionText}
                   maxLength={suggestionMax}
-                  onChange={(e) => setSuggestionText(e.target.value)}
+                  disabled={suggestionSubmitting}
+                  onChange={(e) => {
+                    setSuggestionText(e.target.value);
+                    setSuggestionError(null);
+                  }}
                 ></textarea>
                 <div className="flex items-center justify-between text-xs font-bold text-gray-500 mb-4">
                   <span>Be specific for faster fixes.</span>
                   <span>{suggestionRemaining} characters left</span>
                 </div>
-                <NeoButton onClick={submitSuggestion} className="w-full py-3 flex justify-center gap-2">
-                  Send Message <Send size={20} />
+                {suggestionError && <p className="text-xs font-bold text-red-600 mb-4">{suggestionError}</p>}
+                <NeoButton type="submit" disabled={suggestionSubmitting} className="w-full py-3 flex justify-center gap-2">
+                  {suggestionSubmitting ? 'Sending...' : 'Send Message'} <Send size={20} />
                 </NeoButton>
-              </div>
+              </form>
             </div>
           )}
         </main>

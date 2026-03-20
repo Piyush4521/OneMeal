@@ -99,7 +99,7 @@ const NGO_PICK_SCHEMA: GeminiResponseSchema = {
     required: ['picks'],
 };
 
-const normalizeNgoPicks = (payload: unknown) => {
+const normalizeNgoPicks = (payload: unknown): string[] => {
     if (!payload || typeof payload !== 'object' || !Array.isArray((payload as { picks?: unknown[] }).picks)) {
         return [];
     }
@@ -112,7 +112,7 @@ const normalizeNgoPicks = (payload: unknown) => {
             if (!title && !reason) return '';
             return title ? `${title}: ${reason || 'Good pickup fit.'}` : reason;
         })
-        .filter(Boolean)
+        .filter((item): item is string => Boolean(item))
         .slice(0, 3) || [];
 };
 

@@ -31,9 +31,10 @@ import foodImage from '../assets/img3.png';
 import storyImage1 from '../assets/img11.png';
 import storyImage2 from '../assets/img12.png';
 import storyImage3 from '../assets/img13.png';
-import { auth, db } from '../firebase';
+import { auth, db, storage } from '../firebase';
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import { addDoc, collection, doc, getDocs, onSnapshot, query, serverTimestamp, where } from 'firebase/firestore';
+import { deleteObject, getDownloadURL, ref as storageRef, uploadBytes } from 'firebase/storage';
 import toast from 'react-hot-toast';
 import GoogleTranslate from '../components/GoogleTranslate';
 import { openChat } from '../lib/chatEvents';
@@ -59,12 +60,31 @@ type ImpactStats = {
   foodKg: number;
 };
 
+type StoryItem = {
+  id: string;
+  image: string;
+  title: string;
+  detail: string;
+  tag: string;
+  body: string;
+  location: string;
+  author: string;
+  roleLabel: string;
+  mealsServed: number;
+  volunteers: number;
+  createdAtMs: number;
+  impactNote: string;
+  source: 'fallback' | 'community';
+};
+
 const FLOATING_SHAPES = Array.from({ length: 14 }, (_, index) => index);
 const SHAPE_COLORS = ['bg-primary/20', 'bg-secondary/20', 'bg-accent/20'];
+const STORY_IMAGE_MAX_MB = 6;
 
 const random = (min: number, max: number) => Math.random() * (max - min) + min;
 
 const numberFormatter = new Intl.NumberFormat('en-IN');
+const storyDateFormatter = new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium' });
 
 const fallbackImpact: ImpactStats = {
   donations: 240,
@@ -111,24 +131,57 @@ const motivationLines = [
   'Built with heart and hustle.',
 ];
 
-const galleryItems = [
+const fallbackStories: StoryItem[] = [
   {
+    id: 'fallback-story-1',
     image: storyImage1,
     title: 'Wedding Surplus, 300 Meals',
     detail: 'Recovered in 40 minutes with 2 volunteers.',
     tag: 'Solapur',
+    body:
+      'A local wedding hall called our NGO partner right after dinner service. Two volunteers packed the extra trays, checked seal quality, and routed the food to a nearby shelter before midnight. What could have been waste became hot meals for families the same night.',
+    location: 'Solapur, Maharashtra',
+    author: 'Sahyog Shelter Team',
+    roleLabel: 'NGO Story',
+    mealsServed: 300,
+    volunteers: 2,
+    createdAtMs: new Date('2026-02-11T19:30:00+05:30').getTime(),
+    impactNote: 'Large event rescue completed within one pickup window.',
+    source: 'fallback',
   },
   {
+    id: 'fallback-story-2',
     image: storyImage2,
     title: 'Hostel Kitchen Drive',
     detail: 'Weekly routine, consistent supply.',
     tag: 'Pune',
+    body:
+      'An engineering hostel now shares its extra dinner prep every Friday. The kitchen team labels every container, our NGO logs the pickup, and community volunteers distribute the food to students and workers staying in temporary housing nearby.',
+    location: 'Pune, Maharashtra',
+    author: 'Campus Meal Circle',
+    roleLabel: 'NGO Story',
+    mealsServed: 160,
+    volunteers: 4,
+    createdAtMs: new Date('2026-02-19T18:00:00+05:30').getTime(),
+    impactNote: 'A recurring weekly flow now prevents waste before it starts.',
+    source: 'fallback',
   },
   {
+    id: 'fallback-story-3',
     image: storyImage3,
     title: 'Restaurant Rescue',
     detail: 'Daily close-out pickups, zero waste.',
     tag: 'Mumbai',
+    body:
+      'A restaurant owner started sharing safe unsold meals at closing time instead of discarding them. The pickup is now part of the nightly routine, with clear timing, sealed packaging, and a verified NGO handoff that keeps the process fast and trustworthy.',
+    location: 'Mumbai, Maharashtra',
+    author: 'Seva Route Mumbai',
+    roleLabel: 'NGO Story',
+    mealsServed: 95,
+    volunteers: 3,
+    createdAtMs: new Date('2026-03-01T22:00:00+05:30').getTime(),
+    impactNote: 'Nightly rescue system reduced end-of-day waste to almost zero.',
+    source: 'fallback',
   },
 ];
 
@@ -199,6 +252,50 @@ const getFoodBadge = (karma: number) => {
   return 'Food Hero';
 };
 
+const getStoryMillis = (value: unknown, fallback = Date.now()) => {
+  if (!value) return fallback;
+  if (typeof value === 'number') return value;
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'string') {
+    const parsed = new Date(value).getTime();
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  if (typeof value === 'object' && value && 'toMillis' in value && typeof (value as { toMillis?: unknown }).toMillis === 'function') {
+    return (value as { toMillis: () => number }).toMillis();
+  }
+  if (typeof value === 'object' && value && 'seconds' in value && typeof (value as { seconds?: unknown }).seconds === 'number') {
+    return (value as { seconds: number }).seconds * 1000;
+  }
+  return fallback;
+};
+
+const sanitizeNumberInput = (value: string) => value.replace(/[^\d]/g, '');
+
+const getActionErrorMessage = (error: unknown, fallback: string) => {
+  const code =
+    typeof error === 'object' && error && 'code' in error && typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code
+      : '';
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : '';
+
+  if (/permission-denied|storage\/unauthorized/i.test(code) || /permission|unauthorized/i.test(message)) {
+    return 'Permission denied. Please check Firebase Storage and Firestore rules for stories.';
+  }
+  if (/unauth|auth\//i.test(code) || /sign in|login/i.test(message)) {
+    return 'Please sign in again as NGO and retry.';
+  }
+  if (/network|offline|failed to fetch|unavailable/i.test(message) || /network-request-failed/i.test(code)) {
+    return 'Network issue detected. Please retry when your connection is stable.';
+  }
+
+  return message ? `${fallback} ${message}` : fallback;
+};
+
 const LandingPage = () => {
   const navigate = useNavigate();
   const [user, setUser] = useState<User | null>(null);
@@ -220,6 +317,19 @@ const LandingPage = () => {
   const [moneyAmount, setMoneyAmount] = useState('');
   const [moneyMessage, setMoneyMessage] = useState('');
   const [moneySubmitting, setMoneySubmitting] = useState(false);
+  const [communityStories, setCommunityStories] = useState<StoryItem[]>([]);
+  const [activeStoryIndex, setActiveStoryIndex] = useState<number | null>(null);
+  const [showStoryUploadModal, setShowStoryUploadModal] = useState(false);
+  const [storyTitle, setStoryTitle] = useState('');
+  const [storyLocation, setStoryLocation] = useState('');
+  const [storySummary, setStorySummary] = useState('');
+  const [storyBody, setStoryBody] = useState('');
+  const [storyMeals, setStoryMeals] = useState('');
+  const [storyVolunteers, setStoryVolunteers] = useState('');
+  const [storyImageFile, setStoryImageFile] = useState<File | null>(null);
+  const [storyImagePreview, setStoryImagePreview] = useState<string | null>(null);
+  const [storyUploading, setStoryUploading] = useState(false);
+  const [storyUploadError, setStoryUploadError] = useState<string | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -233,6 +343,12 @@ const LandingPage = () => {
     });
     return () => unsubscribe();
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (storyImagePreview) URL.revokeObjectURL(storyImagePreview);
+    };
+  }, [storyImagePreview]);
 
   useEffect(() => {
     if (!user) {
@@ -282,6 +398,69 @@ const LandingPage = () => {
     });
     return () => unsubAnnounce();
   }, []);
+
+  useEffect(() => {
+    const unsubscribe = onSnapshot(
+      collection(db, 'communityStories'),
+      (snapshot) => {
+        const mappedStories = snapshot.docs.map<StoryItem | null>((docSnap, index) => {
+            const data = docSnap.data();
+            const fallbackImage = fallbackStories[index % fallbackStories.length]?.image || foodImage;
+            const title = typeof data?.title === 'string' ? data.title.trim() : '';
+            const detail = typeof data?.summary === 'string'
+              ? data.summary.trim()
+              : typeof data?.detail === 'string'
+                ? data.detail.trim()
+                : '';
+            const body = typeof data?.body === 'string'
+              ? data.body.trim()
+              : detail;
+
+            if (!title || !detail) return null;
+
+            const location = typeof data?.location === 'string' && data.location.trim()
+              ? data.location.trim()
+              : 'OneMeal Community';
+            const mealsServed = Number(data?.mealsServed ?? data?.meals ?? 0);
+            const volunteers = Number(data?.volunteers ?? data?.helpers ?? 0);
+            const tag = location.split(',')[0]?.trim() || 'Community';
+
+            return {
+              id: docSnap.id,
+              image: typeof data?.imageUrl === 'string' && data.imageUrl.trim() ? data.imageUrl : fallbackImage,
+              title,
+              detail,
+              tag,
+              body,
+              location,
+              author: typeof data?.authorName === 'string' && data.authorName.trim()
+                ? data.authorName.trim()
+                : 'NGO Team',
+              roleLabel: 'NGO Story',
+              mealsServed: Number.isFinite(mealsServed) ? mealsServed : 0,
+              volunteers: Number.isFinite(volunteers) ? volunteers : 0,
+              createdAtMs: getStoryMillis(data?.createdAt, getStoryMillis(data?.createdAtClient, Date.now())),
+              impactNote: typeof data?.impactNote === 'string' && data.impactNote.trim()
+                ? data.impactNote.trim()
+                : 'Shared from the OneMeal NGO network.',
+              source: 'community' as const,
+            };
+          });
+
+        const nextStories = mappedStories
+          .filter((story): story is StoryItem => story !== null)
+          .sort((a, b) => b.createdAtMs - a.createdAtMs);
+
+        setCommunityStories(nextStories);
+      },
+      (error) => {
+        console.warn('Community stories read failed:', error);
+        setCommunityStories([]);
+      }
+    );
+
+    return () => unsubscribe();
+  }, [user?.uid]);
 
   useEffect(() => {
     const fetchStats = async () => {
@@ -388,6 +567,19 @@ const LandingPage = () => {
   const statsSource = impactStats.donations > 0 ? impactStats : fallbackImpact;
   const usingFallback = impactStats.donations === 0;
   const dashboardPath = user ? (userRole === 'receiver' ? '/receiver' : '/donor') : '/login';
+  const isNgoUser = Boolean(user && userRole === 'receiver');
+
+  const displayedStories = useMemo(() => {
+    const merged = [...communityStories, ...fallbackStories];
+    const seen = new Set<string>();
+    return merged.filter((story) => {
+      if (seen.has(story.id)) return false;
+      seen.add(story.id);
+      return true;
+    }).slice(0, 6);
+  }, [communityStories]);
+
+  const activeStory = activeStoryIndex === null ? null : displayedStories[activeStoryIndex] ?? null;
 
   const donationCount = useCountUp(statsSource.donations);
   const mealCount = useCountUp(statsSource.meals);
@@ -434,6 +626,17 @@ const LandingPage = () => {
   const displayedFoodLeaders = foodLeaders.length ? foodLeaders : fallbackFoodLeaders;
   const displayedMoneyLeaders = moneyLeaders.length ? moneyLeaders : fallbackMoneyLeaders;
 
+  useEffect(() => {
+    if (activeStoryIndex === null) return;
+    if (displayedStories.length === 0) {
+      setActiveStoryIndex(null);
+      return;
+    }
+    if (activeStoryIndex >= displayedStories.length) {
+      setActiveStoryIndex(displayedStories.length - 1);
+    }
+  }, [activeStoryIndex, displayedStories]);
+
   const handleRecipeJump = (event: React.FormEvent) => {
     event.preventDefault();
     const trimmed = recipeInput.trim();
@@ -448,6 +651,78 @@ const LandingPage = () => {
     setMoneyAmount('');
     setMoneyMessage('');
     setShowMoneyModal(true);
+  };
+
+  const resetStoryUploadForm = () => {
+    if (storyImagePreview) URL.revokeObjectURL(storyImagePreview);
+    setStoryTitle('');
+    setStoryLocation('');
+    setStorySummary('');
+    setStoryBody('');
+    setStoryMeals('');
+    setStoryVolunteers('');
+    setStoryImageFile(null);
+    setStoryImagePreview(null);
+    setStoryUploadError(null);
+  };
+
+  const openStoryViewer = (index: number) => {
+    if (!displayedStories.length) {
+      toast.error('No stories available right now.');
+      return;
+    }
+    setActiveStoryIndex(index);
+  };
+
+  const closeStoryViewer = () => setActiveStoryIndex(null);
+
+  const shiftStory = (direction: 'prev' | 'next') => {
+    if (!displayedStories.length) return;
+    setActiveStoryIndex((current) => {
+      const safeIndex = current ?? 0;
+      return direction === 'next'
+        ? (safeIndex + 1) % displayedStories.length
+        : (safeIndex - 1 + displayedStories.length) % displayedStories.length;
+    });
+  };
+
+  const handleStoryUploadOpen = () => {
+    if (!user) {
+      toast.error('Login as NGO to upload a story.');
+      navigate('/login');
+      return;
+    }
+    if (!isNgoUser) {
+      toast.error('Story uploads are unlocked only for NGO accounts.');
+      return;
+    }
+
+    resetStoryUploadForm();
+    setShowStoryUploadModal(true);
+  };
+
+  const handleStoryImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      event.target.value = '';
+      return;
+    }
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please choose an image file.');
+      event.target.value = '';
+      return;
+    }
+    if (file.size > STORY_IMAGE_MAX_MB * 1024 * 1024) {
+      toast.error(`Story image must be under ${STORY_IMAGE_MAX_MB}MB.`);
+      event.target.value = '';
+      return;
+    }
+
+    if (storyImagePreview) URL.revokeObjectURL(storyImagePreview);
+    setStoryImageFile(file);
+    setStoryImagePreview(URL.createObjectURL(file));
+    setStoryUploadError(null);
+    event.target.value = '';
   };
 
   const handleMoneySubmit = async (event: React.FormEvent) => {
@@ -480,6 +755,95 @@ const LandingPage = () => {
       toast.error('Failed to record donation.');
     } finally {
       setMoneySubmitting(false);
+    }
+  };
+
+  const handleStoryUploadSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!user) {
+      toast.error('Please login as NGO first.');
+      navigate('/login');
+      return;
+    }
+    if (!isNgoUser) {
+      toast.error('Only NGO accounts can upload stories.');
+      return;
+    }
+
+    const trimmedTitle = storyTitle.trim();
+    const trimmedLocation = storyLocation.trim();
+    const trimmedSummary = storySummary.trim();
+    const trimmedBody = storyBody.trim();
+    const mealsServed = Number(storyMeals);
+    const volunteerCount = Number(storyVolunteers);
+
+    if (!trimmedTitle || !trimmedLocation || !trimmedSummary || !trimmedBody) {
+      const message = 'Fill title, location, summary, and full story.';
+      setStoryUploadError(message);
+      toast.error(message);
+      return;
+    }
+    if (!storyImageFile) {
+      const message = 'Please add a story image.';
+      setStoryUploadError(message);
+      toast.error(message);
+      return;
+    }
+    if (!Number.isFinite(mealsServed) || mealsServed <= 0) {
+      const message = 'Enter meals served as a valid number.';
+      setStoryUploadError(message);
+      toast.error(message);
+      return;
+    }
+    if (!Number.isFinite(volunteerCount) || volunteerCount <= 0) {
+      const message = 'Enter volunteer count as a valid number.';
+      setStoryUploadError(message);
+      toast.error(message);
+      return;
+    }
+
+    setStoryUploading(true);
+    setStoryUploadError(null);
+
+    const safeFileName = storyImageFile.name.replace(/[^a-zA-Z0-9._-]+/g, '-');
+    const imagePath = `communityStories/${user.uid}/${Date.now()}-${safeFileName}`;
+
+    try {
+      await uploadBytes(storageRef(storage, imagePath), storyImageFile);
+      const imageUrl = await getDownloadURL(storageRef(storage, imagePath));
+
+      await addDoc(collection(db, 'communityStories'), {
+        title: trimmedTitle,
+        summary: trimmedSummary,
+        body: trimmedBody,
+        location: trimmedLocation,
+        mealsServed,
+        volunteers: volunteerCount,
+        imageUrl,
+        imagePath,
+        authorId: user.uid,
+        authorName: user.displayName || user.email || 'NGO Team',
+        authorRole: 'receiver',
+        status: 'published',
+        impactNote: `${mealsServed} meals supported with ${volunteerCount} volunteers.`,
+        createdAt: serverTimestamp(),
+        createdAtClient: Date.now(),
+      });
+
+      toast.success('Story uploaded and added to the community section.');
+      setShowStoryUploadModal(false);
+      resetStoryUploadForm();
+      scrollToSection('gallery');
+    } catch (error) {
+      console.error('Story upload failed:', error);
+      if (imagePath) {
+        deleteObject(storageRef(storage, imagePath)).catch(() => null);
+      }
+      const message = getActionErrorMessage(error, 'Failed to upload story.');
+      setStoryUploadError(message);
+      toast.error(message);
+    } finally {
+      setStoryUploading(false);
     }
   };
 
@@ -891,37 +1255,69 @@ const LandingPage = () => {
           <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-6 mb-8">
             <div>
               <div className="text-xs font-black uppercase text-gray-500">Impact Stories</div>
-              <h2 className="text-4xl font-black">Community gallery</h2>
+              <h2 className="text-4xl font-black">Community stories</h2>
               <p className="text-lg font-bold text-gray-600 mt-2">
-                Real pickups, real people, real meals served.
+                Tap any card to open the full story, impact, and pickup details.
               </p>
             </div>
-            <NeoButton variant="secondary" onClick={() => openChat('Show me recent impact stories.')}
-            >
-              View more stories
-              <ArrowRight size={18} />
-            </NeoButton>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <NeoButton variant="secondary" onClick={() => openStoryViewer(0)}>
+                View stories
+                <ArrowRight size={18} />
+              </NeoButton>
+              {isNgoUser ? (
+                <NeoButton onClick={handleStoryUploadOpen} className="bg-primary text-dark">
+                  Upload NGO story
+                </NeoButton>
+              ) : user ? (
+                <div className="px-4 py-3 text-xs font-black uppercase border-2 border-dark rounded-xl bg-white flex items-center justify-center">
+                  NGO login unlocks uploads
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => navigate('/login')}
+                  className="px-4 py-3 text-xs font-black uppercase border-2 border-dark rounded-xl bg-white hover:bg-gray-50"
+                >
+                  Login as NGO to upload
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="grid md:grid-cols-3 gap-6">
-            {galleryItems.map((item, index) => (
-              <motion.div
-                key={item.title}
+            {displayedStories.map((item, index) => (
+              <motion.button
+                key={item.id}
+                type="button"
                 initial={{ opacity: 0, y: 20 }}
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true, amount: 0.3 }}
                 transition={{ delay: index * 0.1 }}
-                className="bg-white border-4 border-dark rounded-3xl overflow-hidden shadow-neo"
+                whileHover={{ y: -4, x: -4 }}
+                whileTap={{ y: 1, x: 1 }}
+                onClick={() => openStoryViewer(index)}
+                className="bg-white border-4 border-dark rounded-3xl overflow-hidden shadow-neo text-left focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-yellow-300"
               >
-                <div className="h-48 overflow-hidden border-b-4 border-dark">
+                <div className="h-48 overflow-hidden border-b-4 border-dark relative">
                   <img src={item.image} alt={item.title} className="w-full h-full object-cover" />
+                  <div className="absolute left-4 top-4 bg-white/95 border-2 border-dark rounded-full px-3 py-1 text-[10px] font-black uppercase">
+                    {item.tag}
+                  </div>
+                  <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 via-black/20 to-transparent px-4 pb-4 pt-10">
+                    <div className="text-xs font-black uppercase tracking-wide text-yellow-200">Tap to view full story</div>
+                    <div className="text-sm font-bold text-white">{item.author}</div>
+                  </div>
                 </div>
                 <div className="p-5">
-                  <div className="text-xs font-black uppercase text-gray-500">{item.tag}</div>
                   <div className="text-xl font-black mb-2">{item.title}</div>
                   <p className="text-sm font-bold text-gray-600">{item.detail}</p>
+                  <div className="mt-4 flex items-center justify-between text-xs font-black text-gray-500 uppercase">
+                    <span>{item.roleLabel}</span>
+                    <span>{numberFormatter.format(item.mealsServed)} meals</span>
+                  </div>
                 </div>
-              </motion.div>
+              </motion.button>
             ))}
           </div>
         </div>
@@ -1093,6 +1489,250 @@ const LandingPage = () => {
           </div>
         </div>
       </footer>
+
+      <AnimatePresence>
+        {activeStory && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[1000] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+            onClick={closeStoryViewer}
+          >
+            <motion.div
+              initial={{ y: 24, opacity: 0, scale: 0.96 }}
+              animate={{ y: 0, opacity: 1, scale: 1 }}
+              exit={{ y: 16, opacity: 0, scale: 0.98 }}
+              transition={{ type: 'spring', stiffness: 220, damping: 20 }}
+              className="bg-[#FFFDF5] border-4 border-dark rounded-3xl shadow-neo w-full max-w-5xl max-h-[92vh] overflow-hidden grid lg:grid-cols-[1.05fr_0.95fr]"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="relative min-h-[260px] lg:min-h-full bg-dark">
+                <img src={activeStory.image} alt={activeStory.title} className="w-full h-full object-cover" />
+                <div className="absolute left-4 top-4 bg-yellow-200 border-2 border-dark rounded-full px-3 py-1 text-[10px] font-black uppercase">
+                  {activeStory.tag}
+                </div>
+                <div className="absolute right-4 top-4 bg-white border-2 border-dark rounded-full px-3 py-1 text-[10px] font-black uppercase">
+                  {activeStory.source === 'community' ? 'Live story' : 'Featured'}
+                </div>
+                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/40 to-transparent px-5 pb-5 pt-12 text-white">
+                  <div className="text-xs font-black uppercase tracking-wide text-yellow-200">{activeStory.roleLabel}</div>
+                  <h3 className="text-3xl font-black mt-2">{activeStory.title}</h3>
+                  <p className="text-sm font-bold text-white/90 mt-2">{activeStory.detail}</p>
+                </div>
+              </div>
+
+              <div className="p-6 md:p-7 overflow-y-auto">
+                <div className="flex items-center justify-between gap-3 mb-5">
+                  <div>
+                    <div className="text-xs font-black uppercase text-gray-500">Story details</div>
+                    <div className="text-lg font-black">{activeStory.location}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={closeStoryViewer}
+                    className="text-xs font-bold px-3 py-2 border-2 border-dark rounded-lg bg-white hover:bg-gray-50"
+                  >
+                    Close
+                  </button>
+                </div>
+
+                <div className="grid sm:grid-cols-2 gap-3 mb-5">
+                  <div className="bg-white border-2 border-dark rounded-2xl p-4">
+                    <div className="text-[10px] font-black uppercase text-gray-500">Meals served</div>
+                    <div className="text-2xl font-black mt-1">{numberFormatter.format(activeStory.mealsServed)}</div>
+                  </div>
+                  <div className="bg-white border-2 border-dark rounded-2xl p-4">
+                    <div className="text-[10px] font-black uppercase text-gray-500">Volunteers</div>
+                    <div className="text-2xl font-black mt-1">{numberFormatter.format(activeStory.volunteers)}</div>
+                  </div>
+                  <div className="bg-white border-2 border-dark rounded-2xl p-4">
+                    <div className="text-[10px] font-black uppercase text-gray-500">Shared by</div>
+                    <div className="text-base font-black mt-1">{activeStory.author}</div>
+                  </div>
+                  <div className="bg-white border-2 border-dark rounded-2xl p-4">
+                    <div className="text-[10px] font-black uppercase text-gray-500">Posted</div>
+                    <div className="text-base font-black mt-1">{storyDateFormatter.format(new Date(activeStory.createdAtMs))}</div>
+                  </div>
+                </div>
+
+                <div className="bg-yellow-50 border-2 border-yellow-200 rounded-2xl p-4 mb-4">
+                  <div className="text-[10px] font-black uppercase text-yellow-700">Impact note</div>
+                  <p className="font-bold text-gray-700 mt-2">{activeStory.impactNote}</p>
+                </div>
+
+                <div className="bg-white border-2 border-dark rounded-2xl p-5">
+                  <div className="text-[10px] font-black uppercase text-gray-500 mb-2">Full story</div>
+                  <p className="font-bold text-gray-700 whitespace-pre-line leading-relaxed">{activeStory.body}</p>
+                </div>
+
+                {displayedStories.length > 1 && (
+                  <div className="flex flex-col sm:flex-row gap-3 mt-5">
+                    <NeoButton type="button" variant="secondary" className="w-full" onClick={() => shiftStory('prev')}>
+                      Previous story
+                    </NeoButton>
+                    <NeoButton type="button" className="w-full" onClick={() => shiftStory('next')}>
+                      Next story <ArrowRight size={18} />
+                    </NeoButton>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showStoryUploadModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[1000] bg-black/65 flex items-center justify-center p-4"
+            onClick={() => {
+              if (!storyUploading) {
+                setShowStoryUploadModal(false);
+                resetStoryUploadForm();
+              }
+            }}
+          >
+            <motion.div
+              initial={{ y: 20, scale: 0.95, opacity: 0 }}
+              animate={{ y: 0, scale: 1, opacity: 1 }}
+              exit={{ y: 10, scale: 0.98, opacity: 0 }}
+              transition={{ type: 'spring', stiffness: 220, damping: 18 }}
+              className="bg-white border-4 border-dark rounded-3xl p-6 shadow-neo w-full max-w-2xl max-h-[92vh] overflow-y-auto"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-center justify-between gap-4 mb-5">
+                <div>
+                  <div className="text-xs font-black uppercase text-gray-500">NGO only</div>
+                  <h3 className="text-2xl font-black">Upload community story</h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowStoryUploadModal(false);
+                    resetStoryUploadForm();
+                  }}
+                  disabled={storyUploading}
+                  className="text-xs font-bold px-3 py-2 border-2 border-dark rounded-lg bg-white hover:bg-gray-50 disabled:opacity-60"
+                >
+                  Close
+                </button>
+              </div>
+
+              <form onSubmit={handleStoryUploadSubmit} className="space-y-4">
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-xs font-bold text-gray-600 uppercase">Story title</label>
+                    <input
+                      type="text"
+                      value={storyTitle}
+                      onChange={(event) => {
+                        setStoryTitle(event.target.value);
+                        setStoryUploadError(null);
+                      }}
+                      placeholder="e.g. Night shelter dinner rescue"
+                      className="w-full border-2 border-dark rounded-xl px-3 py-2 font-bold outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-gray-600 uppercase">Location</label>
+                    <input
+                      type="text"
+                      value={storyLocation}
+                      onChange={(event) => {
+                        setStoryLocation(event.target.value);
+                        setStoryUploadError(null);
+                      }}
+                      placeholder="e.g. Pune, Maharashtra"
+                      className="w-full border-2 border-dark rounded-xl px-3 py-2 font-bold outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-gray-600 uppercase">Short summary</label>
+                  <textarea
+                    value={storySummary}
+                    onChange={(event) => {
+                      setStorySummary(event.target.value);
+                      setStoryUploadError(null);
+                    }}
+                    placeholder="1-2 lines for the story card"
+                    className="w-full border-2 border-dark rounded-xl px-3 py-2 font-bold outline-none h-24 resize-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-gray-600 uppercase">Full story</label>
+                  <textarea
+                    value={storyBody}
+                    onChange={(event) => {
+                      setStoryBody(event.target.value);
+                      setStoryUploadError(null);
+                    }}
+                    placeholder="Share what happened, who helped, and the impact."
+                    className="w-full border-2 border-dark rounded-xl px-3 py-2 font-bold outline-none h-32 resize-none"
+                  />
+                </div>
+
+                <div className="grid md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-xs font-bold text-gray-600 uppercase">Meals served</label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={storyMeals}
+                      onChange={(event) => {
+                        setStoryMeals(sanitizeNumberInput(event.target.value));
+                        setStoryUploadError(null);
+                      }}
+                      placeholder="e.g. 120"
+                      className="w-full border-2 border-dark rounded-xl px-3 py-2 font-bold outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-bold text-gray-600 uppercase">Volunteers involved</label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={storyVolunteers}
+                      onChange={(event) => {
+                        setStoryVolunteers(sanitizeNumberInput(event.target.value));
+                        setStoryUploadError(null);
+                      }}
+                      placeholder="e.g. 4"
+                      className="w-full border-2 border-dark rounded-xl px-3 py-2 font-bold outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="border-2 border-dashed border-dark rounded-2xl p-4 bg-gray-50">
+                  <label className="text-xs font-bold text-gray-600 uppercase">Story image</label>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleStoryImageSelect}
+                    className="mt-2 block w-full text-sm font-bold"
+                  />
+                  <p className="text-xs font-bold text-gray-500 mt-2">Use JPG/PNG under {STORY_IMAGE_MAX_MB}MB.</p>
+                  {storyImagePreview && (
+                    <img src={storyImagePreview} alt="Story preview" className="mt-4 h-48 w-full object-cover rounded-2xl border-2 border-dark" />
+                  )}
+                </div>
+
+                {storyUploadError && <p className="text-xs font-bold text-red-600">{storyUploadError}</p>}
+
+                <NeoButton type="submit" className="w-full" disabled={storyUploading}>
+                  {storyUploading ? 'Uploading story...' : 'Publish story'}
+                </NeoButton>
+              </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {showMoneyModal && (

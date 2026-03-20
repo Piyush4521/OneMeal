@@ -15,6 +15,20 @@ body {
     color: transparent !important;
 }
 
+.google-translate-host {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    max-width: 100%;
+    flex-shrink: 0;
+    isolation: isolate;
+}
+
+.google-translate-host > div {
+    max-width: 100%;
+}
+
 .goog-te-banner-frame {
     display: none !important;
 }
@@ -49,6 +63,10 @@ body {
 .goog-te-gadget-simple:hover {
     transform: translate(1px, 1px) !important;
     box-shadow: 1px 1px 0px 0px #000000 !important;
+}
+
+.goog-te-menu-frame.skiptranslate {
+    max-width: min(320px, calc(100vw - 24px)) !important;
 }
 
 .goog-te-gadget-icon, 
