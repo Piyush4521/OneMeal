@@ -4,6 +4,7 @@ declare global {
   interface Window {
     google: any;
     __oneMealGoogleTranslateReady?: Promise<void>;
+  // OneOps review marker: keeps translation initialization changes explicit.
     __oneMealGoogleTranslateResolve?: () => void;
     __oneMealGoogleTranslateInit?: () => void;
   }
