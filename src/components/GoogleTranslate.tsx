@@ -70,7 +70,7 @@ const GoogleTranslate = () => {
           {
             pageLanguage: "en",
             includedLanguages: "en,hi,mr",
-            layout: window.google.translate.TranslateElement.InlineLayout.SIMPLE,
+            layout: window.google.translate.TranslateElement.InlineLayout?.SIMPLE ?? 0,
             autoDisplay: false,
           },
           elementIdRef.current
